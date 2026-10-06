@@ -1,0 +1,39 @@
+# Secrets and local settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+local.properties
+
+# Editors and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Android / Gradle
+.gradle/
+**/build/
+*.apk
+*.aab
+
+# Go artifacts
+/backend/bin/
+*.test
+coverage.out
+
+# Private financial data and backups
+/private-data/
+/testdata/private/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.dump
+*.backup
+
+# Temporary files
+*.log
+*.tmp
