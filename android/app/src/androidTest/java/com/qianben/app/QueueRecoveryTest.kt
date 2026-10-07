@@ -11,6 +11,21 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class QueueRecoveryTest {
     @Test
+    fun sourceSelectionPersistsAndRejectsUnknownPackages() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val settings = Settings(ctx)
+        val previous = settings.notificationSources
+        try {
+            settings.notificationSources = setOf("com.tencent.mm", "not.a.financial.source")
+            assertEquals(setOf("com.tencent.mm"), Settings(ctx).notificationSources)
+            settings.notificationSources = emptySet()
+            assertTrue(Settings(ctx).notificationSources.isEmpty())
+        } finally {
+            settings.notificationSources = previous
+        }
+    }
+
+    @Test
     fun encryptedQueueSurvivesDatabaseReopen() {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "qa-${UUID.randomUUID()}.db"

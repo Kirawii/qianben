@@ -2,7 +2,7 @@ plugins { id("com.android.application"); id("org.jetbrains.kotlin.android"); id(
 android {
  namespace = "com.qianben.app"
  compileSdk = 35
- defaultConfig { applicationId = "com.qianben.app"; minSdk = 26; targetSdk = 35; versionCode = 2; versionName = "0.1.1";testInstrumentationRunner="androidx.test.runner.AndroidJUnitRunner" }
+ defaultConfig { applicationId = "com.qianben.app"; minSdk = 26; targetSdk = 35; versionCode = 3; versionName = "0.1.2";testInstrumentationRunner="androidx.test.runner.AndroidJUnitRunner" }
  buildFeatures { buildConfig = true }
  compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
  kotlinOptions { jvmTarget = "17" }

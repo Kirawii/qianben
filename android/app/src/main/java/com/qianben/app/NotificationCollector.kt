@@ -57,6 +57,7 @@ class NotificationCollector : NotificationListenerService() {
             !s.collecting ||
                 s.ledger.isBlank() ||
                 sbn.packageName !in allowed ||
+                sbn.packageName !in s.notificationSources ||
                 (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
         )
             return

@@ -88,6 +88,13 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	ledger := parts[2]
 	switch parts[3] {
+	case "history":
+		if r.Method != "GET" {
+			w.WriteHeader(405)
+			return
+		}
+		v, e := s.DB.History(r.Context(), actor, ledger, r.URL.Query().Get("event_id"))
+		respond(w, v, e)
 	case "balance-checks":
 		switch r.Method {
 		case "GET":

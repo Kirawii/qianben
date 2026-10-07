@@ -3,10 +3,16 @@ package com.qianben.app
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Bundle
 import android.provider.Settings as AndroidSettings
 import android.text.InputType
+import android.view.Gravity
 import android.widget.*
 import java.time.Instant
 import java.time.ZoneId
@@ -25,13 +31,41 @@ class MainActivity : Activity() {
     private var csvAccount = ""
     private var eventCursor = ""
     private var reportMonth = java.time.YearMonth.now()
-    private val ink = Color.rgb(30, 49, 43)
+    private var reviewOnly = false
+    private val night
+        get() =
+            resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                Configuration.UI_MODE_NIGHT_YES
+
+    private val ink
+        get() = Color.parseColor(if (night) "#E8EEEA" else "#213C33")
+
+    private val muted
+        get() = Color.parseColor(if (night) "#B1C1B7" else "#64756D")
+
+    private val surface
+        get() = Color.parseColor(if (night) "#1B2923" else "#FFFFFF")
+
+    private val canvas
+        get() = Color.parseColor(if (night) "#101B16" else "#F4F6F2")
+
+    private val accent
+        get() = Color.parseColor(if (night) "#A1D7BC" else "#28664C")
+
+    private val line
+        get() = Color.parseColor(if (night) "#35453C" else "#DDE5DD")
+
+    private var screenGeneration = 0
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         window.decorView.systemUiVisibility =
-            android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
-                android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+            if (night) 0
+            else
+                android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
+                    android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        window.statusBarColor = canvas
+        window.navigationBarColor = surface
         settings = Settings(this)
         render()
         if (settings.token.isNotBlank()) reload()
@@ -59,21 +93,76 @@ class MainActivity : Activity() {
             .toInstant()
             .toString()
 
+    private fun shape(color: Int = surface, radius: Int = 16, border: Boolean = false) =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = dp(radius).toFloat()
+            if (border) setStroke(dp(1), line)
+        }
+
+    private fun textView(s: String, size: Float = 16f, color: Int = ink) =
+        TextView(this).apply {
+            text = s
+            textSize = size
+            setTextColor(color)
+            setLineSpacing(dp(3).toFloat(), 1f)
+            if (size >= 20f) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        }
+
     private fun label(s: String, size: Float = 16f) {
         content.addView(
-            TextView(this).apply {
-                text = s
-                textSize = size
-                setTextColor(ink)
-                setPadding(0, 14, 0, 12)
+            textView(s, size, if (size < 16f) muted else ink).apply {
+                setPadding(0, dp(7), 0, dp(7))
             }
         )
+    }
+
+    private fun card(block: () -> Unit) {
+        val parent = content
+        val group =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = shape()
+                setPadding(dp(20), dp(16), dp(20), dp(16))
+            }
+        parent.addView(group, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
+        content = group
+        try {
+            block()
+        } finally {
+            content = parent
+        }
     }
 
     private fun button(s: String, action: () -> Unit) {
         content.addView(
             Button(this).apply {
                 text = s
+                stateListAnimator = null
+                elevation = 0f
+                isAllCaps = false
+                textSize = 15f
+                minHeight = dp(48)
+                minimumHeight = dp(48)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                val primary = s.startsWith("保存") || s.startsWith("确认保存") || s == "创建账本"
+                val danger = s.contains("删除") || s.startsWith("撤销")
+                setTextColor(
+                    if (danger) Color.parseColor(if (night) "#FFB4A8" else "#A5352C")
+                    else if (primary) canvas else accent
+                )
+                background =
+                    RippleDrawable(
+                        ColorStateList.valueOf(line),
+                        shape(if (primary) accent else surface, 12, !primary),
+                        null,
+                    )
+                layoutParams =
+                    LinearLayout.LayoutParams(-1, -2).apply {
+                        topMargin = dp(6)
+                        bottomMargin = dp(6)
+                    }
+                setPadding(dp(16), dp(8), dp(16), dp(8))
                 setOnClickListener { action() }
             }
         )
@@ -82,7 +171,15 @@ class MainActivity : Activity() {
     private fun field(title: String, value: String = "", numeric: Boolean = false): EditText {
         label(title, 13f)
         return EditText(this).apply {
+            contentDescription = title
             setText(value)
+            textSize = 16f
+            setTextColor(ink)
+            setHintTextColor(muted)
+            background = shape(surface, 12, true)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            minHeight = dp(52)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) }
             setSingleLine()
             if (numeric)
                 inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
@@ -93,6 +190,10 @@ class MainActivity : Activity() {
     private fun spinner(title: String, values: List<String>): Spinner {
         label(title, 13f)
         return Spinner(this).apply {
+            background = shape(surface, 12, true)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            minimumHeight = dp(52)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(12) }
             adapter =
                 ArrayAdapter(
                     this@MainActivity,
@@ -107,7 +208,7 @@ class MainActivity : Activity() {
         try {
             java.math.BigDecimal(value).movePointLeft(2).setScale(2).toPlainString()
         } catch (_: Exception) {
-            "—"
+            "待确认"
         }
 
     private fun eventStatus(ev: JSONObject): String {
@@ -160,55 +261,83 @@ class MainActivity : Activity() {
         else Api.request(settings, "/v1/ledgers/${settings.ledger}/$resource", body)
 
     private fun render() {
+        screenGeneration++
         val root =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(20), dp(30), dp(20), dp(8))
+                setPadding(0, dp(24), 0, dp(8))
                 setOnApplyWindowInsetsListener { view, insets ->
                     view.setPadding(
-                        dp(20),
-                        insets.systemWindowInsetTop + dp(16),
-                        dp(20),
-                        insets.systemWindowInsetBottom + dp(8),
+                        0,
+                        insets.systemWindowInsetTop + dp(8),
+                        0,
+                        insets.systemWindowInsetBottom,
                     )
                     insets
                 }
-                setBackgroundColor(Color.rgb(247, 247, 239))
+                setBackgroundColor(canvas)
             }
         root.addView(
             TextView(this).apply {
-                text = "钱本"
-                textSize = 30f
+                val ledgerName =
+                    (0 until ledgers.length())
+                        .map { ledgers.getJSONObject(it) }
+                        .firstOrNull { it.getString("id") == settings.ledger }
+                        ?.optString("name")
+                text = "钱本${ledgerName?.let { "  /  $it" } ?: ""}"
+                textSize = 22f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setPadding(dp(24), dp(12), dp(24), dp(8))
                 setTextColor(ink)
-            }
-        )
-        root.addView(
-            TextView(this).apply {
-                text = "把消费、费用和现金流分开看"
-                setTextColor(ink)
-                setPadding(0, 4, 0, 18)
             }
         )
         val tabs = LinearLayout(this)
+        tabs.setPadding(dp(12), dp(8), dp(12), dp(8))
+        tabs.setBackgroundColor(surface)
         listOf("首页", "账户", "记账", "待确认", "设置").forEach { name ->
             tabs.addView(
                 Button(this).apply {
                     text = name
-                    textSize = 12f
+                    stateListAnimator = null
+                    elevation = 0f
+                    textSize = 13f
+                    isAllCaps = false
+                    minWidth = 0
+                    minimumWidth = 0
+                    minHeight = 0
+                    minimumHeight = 0
+                    setPadding(0, dp(8), 0, dp(8))
+                    setTextColor(if (page == name) accent else muted)
+                    typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                    background =
+                        RippleDrawable(
+                            ColorStateList.valueOf(line),
+                            shape(if (page == name) canvas else surface, 14),
+                            null,
+                        )
+                    contentDescription = "$name${if(page==name) "，当前页面" else ""}"
                     setOnClickListener {
                         page = name
                         render()
                     }
                 },
-                LinearLayout.LayoutParams(0, dp(52), 1f),
+                LinearLayout.LayoutParams(0, dp(48), 1f),
             )
         }
-        root.addView(tabs)
-        content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(20), dp(12), dp(20), dp(20))
+            }
         root.addView(
-            ScrollView(this).apply { addView(content) },
+            ScrollView(this).apply {
+                addView(content)
+                isFillViewport = true
+                isVerticalScrollBarEnabled = false
+            },
             LinearLayout.LayoutParams(-1, 0, 1f),
         )
+        root.addView(tabs)
         setContentView(root)
         if (settings.token.isBlank()) {
             connection()
@@ -250,6 +379,26 @@ class MainActivity : Activity() {
                 setOnCheckedChangeListener { _, on -> settings.collecting = on }
             }
         content.addView(collect)
+        button("选择通知来源（${settings.notificationSources.size} 个）") {
+            val packages = NotificationSources.names.keys.toList()
+            val checked = packages.map { it in settings.notificationSources }.toBooleanArray()
+            AlertDialog.Builder(this)
+                .setTitle("允许读取的财务通知来源")
+                .setMultiChoiceItems(
+                    packages.map { NotificationSources.names.getValue(it) }.toTypedArray(),
+                    checked,
+                ) { _, which, on ->
+                    checked[which] = on
+                }
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存") { _, _ ->
+                    settings.notificationSources =
+                        packages.filterIndexed { index, _ -> checked[index] }.toSet()
+                    render()
+                }
+                .show()
+        }
+        label("开启后，所选来源的必要财务通知片段会加密保存在本机并上传当前服务解析。关闭来源仅停止新采集，已排队证据仍会上传。", 13f)
         label(
             "通知监听：${if(NotificationCollector.connected) "已连接" else "未连接"}\n最近采集：${settings.lastCapture.ifBlank{"尚无记录"}}",
             13f,
@@ -418,72 +567,168 @@ class MainActivity : Activity() {
     }
 
     private fun home() {
-        label("${reportMonth} 财务概览", 22f)
-        button("上个月") {
-            reportMonth = reportMonth.minusMonths(1)
-            render()
-        }
-        button("下个月") {
-            reportMonth = reportMonth.plusMonths(1)
-            render()
-        }
+        val generation = screenGeneration
+        val controls = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        fun monthButton(title: String, step: Long) =
+            Button(this).apply {
+                text = title
+                stateListAnimator = null
+                elevation = 0f
+                isAllCaps = false
+                textSize = 14f
+                setTextColor(accent)
+                background = RippleDrawable(ColorStateList.valueOf(line), shape(surface, 12), null)
+                minWidth = 0
+                minimumWidth = 0
+                setPadding(0, 0, 0, 0)
+                contentDescription = if (step < 0) "上个月" else "下个月"
+                setOnClickListener {
+                    reportMonth = reportMonth.plusMonths(step)
+                    render()
+                }
+            }
+        controls.addView(monthButton("‹", -1), LinearLayout.LayoutParams(dp(48), dp(48)))
+        controls.addView(
+            textView("${reportMonth.year} 年 ${reportMonth.monthValue} 月", 18f).apply {
+                gravity = Gravity.CENTER
+            },
+            LinearLayout.LayoutParams(0, -2, 1f),
+        )
+        controls.addView(monthButton("›", 1), LinearLayout.LayoutParams(dp(48), dp(48)))
+        content.addView(controls, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(18) })
+        val loading = textView("正在读取账本…", 14f, muted)
+        content.addView(loading)
         val zone = ZoneId.systemDefault()
         val selectedMonth = reportMonth
         val from = selectedMonth.atDay(1).atStartOfDay(zone).toInstant()
         val to = selectedMonth.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant()
         task {
             val r =
-                JSONObject(
-                    api(
-                        "reports?from=${java.net.URLEncoder.encode(from.toString(),"UTF-8")}&to=${java.net.URLEncoder.encode(to.toString(),"UTF-8")}"
+                try {
+                    JSONObject(
+                        api(
+                            "reports?from=${java.net.URLEncoder.encode(from.toString(),"UTF-8")}&to=${java.net.URLEncoder.encode(to.toString(),"UTF-8")}"
+                        )
                     )
-                )
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        if (generation == screenGeneration) {
+                            loading.text = "未能读取账本，请检查连接后重试。"
+                            button("重试读取") { render() }
+                        }
+                    }
+                    throw e
+                }
             runOnUiThread {
-                if (page != "首页" || reportMonth != selectedMonth) return@runOnUiThread
-                label("期末账面净资产   ¥ ${money(r.getString("net_worth_minor"))}", 24f)
-                label(
-                    "资产：${money(r.getString("assets_minor"))} · 负债：${money(r.getString("liabilities_minor"))}",
-                    18f,
-                )
-                label("包含待查、应收与转账在途；未与银行核对。未录入账户和期初会影响完整性。", 14f)
-                label(
-                    "会计收入   ¥ ${money(r.getString("income_minor"))}\n会计结余   ¥ ${money(r.getString("surplus_minor"))}",
-                    20f,
-                )
-                label("生活消费   ¥ ${money(r.getString("consumption_minor"))}", 24f)
-                label("会计费用   ¥ ${money(r.getString("expense_minor"))}", 20f)
-                label("现金变动   ¥ ${money(r.getString("cash_change_minor"))}", 20f)
-                label(
-                    "外部现金流：${money(r.getString("external_cash_minor"))}\n内部划转净额：${money(r.getString("internal_cash_minor"))}\n未分类现金净额：${money(r.getString("unresolved_cash_minor"))}",
-                    14f,
-                )
-                label(
-                    "待查金额   ¥ ${money(r.getString("unresolved_balance_minor"))}\n待确认事件   ${r.getLong("review_count")} 笔",
-                    18f,
-                )
-                label(
-                    "转账在途净额   ¥ ${money(r.getString("transfer_clearing_minor"))}\n未关联转账端   ${r.getLong("unlinked_transfer_count")} 笔",
-                    14f,
-                )
-                label(
-                    "账本版本 ${r.getLong("source_version")} · ${r.getString("algorithm_version")}",
-                    12f,
-                )
-                label("生活消费分类（退款按发生月冲减）", 18f)
-                val totals = r.getJSONArray("categories")
-                for (i in 0 until totals.length()) {
-                    val total = totals.getJSONObject(i)
-                    label(
-                        "${total.getString("category")}   ¥ ${money(total.getString("consumption_minor"))}",
-                        16f,
+                if (page != "首页" || reportMonth != selectedMonth || generation != screenGeneration)
+                    return@runOnUiThread
+                content.removeView(loading)
+                card {
+                    label("期末账面净资产", 14f)
+                    label("¥ ${money(r.getString("net_worth_minor"))}", 34f)
+                    val row = LinearLayout(this)
+                    for ((title, key) in
+                        listOf("资产" to "assets_minor", "负债" to "liabilities_minor")) {
+                        row.addView(
+                            LinearLayout(this).apply {
+                                orientation = LinearLayout.VERTICAL
+                                addView(textView(title, 13f, muted))
+                                addView(
+                                    textView("¥ ${money(r.getString(key))}", 18f).apply {
+                                        setPadding(0, dp(8), 0, dp(12))
+                                    }
+                                )
+                            },
+                            LinearLayout.LayoutParams(0, -2, 1f),
+                        )
+                    }
+                    content.addView(row)
+                    label("包含应收、待查与在途，尚未与银行核对。", 12f)
+                }
+                val metrics = LinearLayout(this)
+                for ((title, key) in
+                    listOf("生活消费" to "consumption_minor", "现金变动" to "cash_change_minor")) {
+                    metrics.addView(
+                        LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            background = shape()
+                            setPadding(dp(16), dp(18), dp(12), dp(18))
+                            addView(textView(title, 13f, muted))
+                            addView(
+                                textView("¥ ${money(r.getString(key))}", 22f).apply {
+                                    setPadding(0, dp(10), 0, 0)
+                                }
+                            )
+                        },
+                        LinearLayout.LayoutParams(0, -2, 1f).apply {
+                            if (title == "生活消费") rightMargin = dp(12)
+                        },
                     )
                 }
-                button("刷新") { reload() }
+                content.addView(
+                    metrics,
+                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) },
+                )
+                card {
+                    label("会计收支", 18f)
+                    label(
+                        "收入  ¥ ${money(r.getString("income_minor"))}\n费用  ¥ ${money(r.getString("expense_minor"))}\n结余  ¥ ${money(r.getString("surplus_minor"))}",
+                        16f,
+                    )
+                    button("查看现金流明细") {
+                        AlertDialog.Builder(this)
+                            .setTitle("本月现金流")
+                            .setMessage(
+                                "外部现金流：${money(r.getString("external_cash_minor"))}\n内部划转净额：${money(r.getString("internal_cash_minor"))}\n未分类现金净额：${money(r.getString("unresolved_cash_minor"))}"
+                            )
+                            .setPositiveButton("关闭", null)
+                            .show()
+                    }
+                }
+                card {
+                    label("待处理", 18f)
+                    label(
+                        "${r.getLong("review_count")} 笔待确认  ·  待查 ¥ ${money(r.getString("unresolved_balance_minor"))}"
+                    )
+                    label(
+                        "转账在途 ¥ ${money(r.getString("transfer_clearing_minor"))}  ·  ${r.getLong("unlinked_transfer_count")} 个未关联端",
+                        13f,
+                    )
+                    button("查看待确认") {
+                        page = "待确认"
+                        render()
+                    }
+                }
+                card {
+                    label("消费分类", 18f)
+                    val totals = r.getJSONArray("categories")
+                    if (totals.length() == 0) label("这个月还没有消费记录。", 14f)
+                    for (i in 0 until totals.length()) {
+                        val total = totals.getJSONObject(i)
+                        val row =
+                            LinearLayout(this).apply {
+                                gravity = Gravity.CENTER_VERTICAL
+                                setPadding(0, dp(10), 0, dp(10))
+                            }
+                        row.addView(
+                            textView(total.getString("category"), 15f),
+                            LinearLayout.LayoutParams(0, -2, 1f),
+                        )
+                        row.addView(
+                            textView("¥ ${money(total.getString("consumption_minor"))}", 15f)
+                        )
+                        content.addView(row)
+                    }
+                    label("退款按发生月份冲减，分类金额可以为负。", 12f)
+                }
+                label("账本版本 ${r.getLong("source_version")} · 未录入账户和期初会影响完整性。", 12f)
+                button("刷新账本") { reload() }
             }
         }
     }
 
     private fun rulePage() {
+        screenGeneration++
         content.removeAllViews()
         label("商户分类规则", 22f)
         label("只影响之后的新证据，不重写历史。撤销后旧规则不会自动恢复。", 14f)
@@ -528,9 +773,13 @@ class MainActivity : Activity() {
         for (i in 0 until accounts.length()) {
             val a = accounts.getJSONObject(i)
             if (!a.getString("code").startsWith("user.")) continue
-            label("${a.getString("name")}   ¥ ${money(a.getString("balance_minor"))}", 18f)
-            if (!a.getBoolean("initialized")) button("设置 ${a.getString("name")} 的期初") { opening(a) }
-            else button("检查 ${a.getString("name")} 的实际余额") { balanceCheck(a) }
+            card {
+                label("${a.getString("name")}   ¥ ${money(a.getString("balance_minor"))}", 18f)
+                label(if (a.getString("type") == "LIABILITY") "信用卡 · 欠款为正" else "实际账户 · 账面余额", 13f)
+                if (!a.getBoolean("initialized"))
+                    button("设置 ${a.getString("name")} 的期初") { opening(a) }
+                else button("检查 ${a.getString("name")} 的实际余额") { balanceCheck(a) }
+            }
         }
         button("查看余额检查记录") {
             task {
@@ -577,6 +826,7 @@ class MainActivity : Activity() {
     }
 
     private fun balanceCheck(a: JSONObject) {
+        screenGeneration++
         content.removeAllViews()
         label("${a.getString("name")} · 余额检查", 22f)
         label(
@@ -614,6 +864,7 @@ class MainActivity : Activity() {
     }
 
     private fun opening(a: JSONObject) {
+        screenGeneration++
         content.removeAllViews()
         label("${a.getString("name")} · 期初", 22f)
         val amount =
@@ -644,6 +895,7 @@ class MainActivity : Activity() {
     }
 
     private fun eventForm(old: JSONObject?) {
+        screenGeneration++
         content.removeAllViews()
         label(if (old == null) "手动记账" else "确认 / 修订事件", 22f)
         val facts = old?.getJSONObject("facts") ?: JSONObject()
@@ -771,9 +1023,39 @@ class MainActivity : Activity() {
                 text = "今后同商户沿用此分类"
                 content.addView(this)
             }
+        fun showField(view: android.view.View, show: Boolean) {
+            val visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+            view.visibility = visibility
+            val parent = view.parent as LinearLayout
+            val index = parent.indexOfChild(view)
+            if (index > 0) parent.getChildAt(index - 1).visibility = visibility
+        }
+        fun updateFields() {
+            val selected = kinds[kind.selectedItemPosition]
+            showField(original, selected in listOf("REFUND", "ASSET_REFUND"))
+            showField(asset, selected == "ASSET_PURCHASE")
+            showField(card, selected == "CARD_REPAYMENT")
+            historical.visibility =
+                if (selected == "REFUND") android.view.View.VISIBLE else android.view.View.GONE
+        }
+        kind.onItemSelectedListener =
+            object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: AdapterView<*>?,
+                    view: android.view.View?,
+                    position: Int,
+                    itemId: Long,
+                ) {
+                    updateFields()
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+        updateFields()
         button("确认保存") {
             task {
                 require(account.selectedItemPosition > 0) { "请选择真实付款或收款账户" }
+                val selectedKind = kinds[kind.selectedItemPosition]
                 val f =
                     JSONObject()
                         .put("kind", kinds[kind.selectedItemPosition])
@@ -787,15 +1069,24 @@ class MainActivity : Activity() {
                         )
                         .put("merchant", merchant.text.toString())
                         .put("category", category.text.toString())
-                        .put("asset_title", asset.text.toString())
+                        .put(
+                            "asset_title",
+                            if (selectedKind == "ASSET_PURCHASE") asset.text.toString() else "",
+                        )
                         .put("note", note.text.toString())
-                        .put("historical_original", historical.isChecked)
-                if (original.selectedItemPosition > 0)
+                        .put(
+                            "historical_original",
+                            selectedKind == "REFUND" && historical.isChecked,
+                        )
+                if (
+                    original.selectedItemPosition > 0 &&
+                        selectedKind in listOf("REFUND", "ASSET_REFUND")
+                )
                     f.put(
                         "original_event_id",
                         originals[original.selectedItemPosition - 1].getString("id"),
                     )
-                if (card.selectedItemPosition > 0)
+                if (card.selectedItemPosition > 0 && selectedKind == "CARD_REPAYMENT")
                     f.put(
                         "repayment_account_id",
                         cards[card.selectedItemPosition - 1].getString("id"),
@@ -816,7 +1107,20 @@ class MainActivity : Activity() {
     }
 
     private fun review() {
+        val generation = screenGeneration
         label("事件与待确认", 22f)
+        val filter =
+            Switch(this).apply {
+                text = "只看待确认"
+                setTextColor(ink)
+                isChecked = reviewOnly
+                setPadding(0, dp(8), 0, dp(16))
+                setOnCheckedChangeListener { _, on ->
+                    reviewOnly = on
+                    render()
+                }
+            }
+        content.addView(filter)
         if (eventCursor.isNotBlank())
             button("返回最新事件") {
                 eventCursor = ""
@@ -832,82 +1136,157 @@ class MainActivity : Activity() {
                     (0 until eventCache.length())
                         .map { eventCache.getJSONObject(it).getString("id") }
                         .toSet()
-                for (i in 0 until events.length()) {
-                    val ev = events.getJSONObject(i)
-                    if (ev.getString("id") !in known) eventCache.put(ev)
-                }
+                for (i in 0 until events.length()) if (
+                    events.getJSONObject(i).getString("id") !in known
+                )
+                    eventCache.put(events.getJSONObject(i))
             }
             runOnUiThread {
-                if (page != "待确认") return@runOnUiThread
-                for (i in 0 until events.length()) {
-                    val ev = events.getJSONObject(i)
+                if (page != "待确认" || generation != screenGeneration) return@runOnUiThread
+                val visible =
+                    (0 until events.length())
+                        .map { events.getJSONObject(it) }
+                        .filter { !reviewOnly || it.getString("status") == "REVIEW_REQUIRED" }
+                if (visible.isEmpty())
+                    card {
+                        label(if (reviewOnly) "当前页没有待确认事件" else "还没有事件记录", 18f)
+                        label("可手动记账、导入账单，或查看更早记录。", 14f)
+                    }
+                for (ev in visible) card {
                     val f = ev.getJSONObject("facts")
-                    label(
-                        "${f.optString("merchant").ifBlank{"未识别商户"}} · ¥ ${money(f.getString("amount_minor"))}\n${eventStatus(ev)}"
-                    )
+                    label(f.optString("merchant").ifBlank { "未识别商户" }, 18f)
+                    label("¥ ${money(f.getString("amount_minor"))}", 24f)
+                    label(eventStatus(ev), 14f)
                     if (!f.isNull("occurred_at"))
                         label(displayTime(f.getString("occurred_at")), 12f)
-                    button("查看证据") {
-                        task {
-                            val evidence = JSONArray(api("evidence?event_id=${ev.getString("id")}"))
-                            runOnUiThread {
-                                AlertDialog.Builder(this)
-                                    .setTitle("原始证据")
-                                    .setMessage(evidence.toString(2))
-                                    .setPositiveButton("关闭", null)
-                                    .show()
-                            }
-                        }
-                    }
-                    if (ev.getString("status") !in listOf("MERGED", "SPLIT")) {
+                    if (ev.getString("status") !in listOf("MERGED", "SPLIT"))
                         button("查看并确认") { eventForm(ev) }
-                        button("合并重复事件") { mergeDialog(ev, events) }
-                        button("拆分为两笔") { splitDialog(ev) }
-                        if (f.optString("kind") == "TRANSFER_OUT")
-                            button("关联转入端") { transferDialog(ev, events) }
-                        if (f.optString("kind") in listOf("TRANSFER_OUT", "TRANSFER_IN"))
-                            button("解除转账关联") {
-                                task {
-                                    val relations =
-                                        JSONArray(api("relations?event_id=${ev.getString("id")}"))
-                                    val transfers =
-                                        (0 until relations.length())
-                                            .map { relations.getJSONObject(it) }
-                                            .filter { it.getString("type") == "TRANSFER_LEG_OF" }
-                                    runOnUiThread {
-                                        if (transfers.isEmpty()) {
-                                            Toast.makeText(this, "尚未关联", Toast.LENGTH_SHORT).show()
-                                        } else {
-                                            AlertDialog.Builder(this)
-                                                .setMessage("解除此转账关联后，两端保留各自分录，可分别修订。")
-                                                .setNegativeButton("取消", null)
-                                                .setPositiveButton("解除") { _, _ ->
-                                                    task {
-                                                        api(
-                                                            "unlink-transfer",
-                                                            JSONObject()
-                                                                .put("command_id", id())
-                                                                .put(
-                                                                    "relation_id",
-                                                                    transfers[0].getString("id"),
-                                                                ),
-                                                        )
-                                                        reload()
-                                                    }
-                                                }
-                                                .show()
+                    button("更多操作") {
+                        val choices = mutableListOf("查看证据", "查看修订历史")
+                        if (ev.getString("status") !in listOf("MERGED", "SPLIT")) {
+                            choices.addAll(listOf("合并重复事件", "拆分为两笔"))
+                            if (f.optString("kind") == "TRANSFER_OUT") choices.add("关联转入端")
+                            if (f.optString("kind") in listOf("TRANSFER_OUT", "TRANSFER_IN"))
+                                choices.add("解除转账关联")
+                        }
+                        AlertDialog.Builder(this)
+                            .setTitle("事件操作")
+                            .setItems(choices.toTypedArray()) { _, n ->
+                                when (choices[n]) {
+                                    "查看修订历史" -> historyPage(ev)
+                                    "查看证据" ->
+                                        task {
+                                            val evidence =
+                                                JSONArray(
+                                                    api("evidence?event_id=${ev.getString("id")}")
+                                                )
+                                            runOnUiThread {
+                                                AlertDialog.Builder(this)
+                                                    .setTitle("原始证据")
+                                                    .setMessage(evidence.toString(2))
+                                                    .setPositiveButton("关闭", null)
+                                                    .show()
+                                            }
                                         }
-                                    }
+                                    "合并重复事件" -> mergeDialog(ev, events)
+                                    "拆分为两笔" -> splitDialog(ev)
+                                    "关联转入端" -> transferDialog(ev, events)
+                                    "解除转账关联" -> unlinkTransferDialog(ev)
                                 }
                             }
+                            .show()
                     }
                 }
                 if (events.length() == 500)
                     button("更早的事件") {
                         eventCursor = events.getJSONObject(events.length() - 1).getString("id")
-                        content.removeAllViews()
-                        review()
+                        render()
                     }
+            }
+        }
+    }
+
+    private fun unlinkTransferDialog(ev: JSONObject) {
+        task {
+            val relations = JSONArray(api("relations?event_id=${ev.getString("id")}"))
+            val transfers =
+                (0 until relations.length())
+                    .map { relations.getJSONObject(it) }
+                    .filter { it.getString("type") == "TRANSFER_LEG_OF" }
+            runOnUiThread {
+                if (transfers.isEmpty()) {
+                    Toast.makeText(this, "尚未关联", Toast.LENGTH_SHORT).show()
+                    return@runOnUiThread
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("解除转账关联？")
+                    .setMessage("关联解除后可修订两端事件，既有分录保持不变。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("解除") { _, _ ->
+                        task {
+                            api(
+                                "unlink-transfer",
+                                JSONObject()
+                                    .put("command_id", id())
+                                    .put("relation_id", transfers[0].getString("id")),
+                            )
+                            reload()
+                        }
+                    }
+                    .show()
+            }
+        }
+    }
+
+    private fun historyPage(ev: JSONObject) {
+        screenGeneration++
+        val generation = screenGeneration
+        content.removeAllViews()
+        label("修订历史", 22f)
+        label("保留每次接受的事实与账务；最近 100 次修订。", 14f)
+        button("返回事件列表") { render() }
+        task {
+            val versions = JSONArray(api("history?event_id=${ev.getString("id")}"))
+            runOnUiThread {
+                if (generation != screenGeneration || page != "待确认") return@runOnUiThread
+                for (i in 0 until versions.length()) {
+                    val v = versions.getJSONObject(i)
+                    val f = v.getJSONObject("facts")
+                    card {
+                        label("第 ${v.getLong("revision")} 次修订", 18f)
+                        label(displayTime(v.getString("created_at")), 12f)
+                        label(
+                            "${f.optString("merchant").ifBlank { "未识别商户" }} · ¥ ${money(f.getString("amount_minor"))}"
+                        )
+                        label(
+                            "${f.optString("category").ifBlank { "未分类" }} · ${f.optString("note").ifBlank { "无备注" }}",
+                            14f,
+                        )
+                        val journals = v.getJSONArray("journals")
+                        if (journals.length() == 0) label("未生成正式分录", 14f)
+                        for (n in 0 until journals.length()) {
+                            val j = journals.getJSONObject(n)
+                            label(
+                                if (j.getString("kind") == "REVERSAL") "冲销旧账务"
+                                else if (!j.isNull("reversed_by")) "原账务 · 后续已冲销" else "正式账务",
+                                14f,
+                            )
+                            val entries = j.getJSONArray("entries")
+                            for (k in 0 until entries.length()) {
+                                val entry = entries.getJSONObject(k)
+                                val debit = entry.getString("debit_minor")
+                                label(
+                                    "${entry.getString("account")}  ${if(debit!="0") "借 ${money(debit)}" else "贷 ${money(entry.getString("credit_minor"))}"}",
+                                    13f,
+                                )
+                            }
+                        }
+                        label(
+                            "账本版本 ${v.getLong("source_version")} · ${v.getJSONArray("evidence_ids").length()} 份证据",
+                            12f,
+                        )
+                    }
+                }
             }
         }
     }

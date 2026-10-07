@@ -220,6 +220,28 @@ func TestPostgresLifecycle(t *testing.T) {
 	if e != nil || r.NetWorth != 103000 {
 		t.Fatal("check adjusted finances", r, e)
 	}
+	history, e := db.History(ctx, actor, ledger.ID, req.EventID)
+	if e != nil || len(history) != 3 {
+		t.Fatal("revision history", len(history), e)
+	}
+	var latest struct {
+		Revision int64             `json:"revision"`
+		Journals []json.RawMessage `json:"journals"`
+	}
+	if e = json.Unmarshal(history[0], &latest); e != nil || latest.Revision != 3 || len(latest.Journals) != 2 {
+		t.Fatal("history posting repair", latest, e)
+	}
+	var oldest struct {
+		Journals []struct {
+			ReversedBy *string `json:"reversed_by"`
+		} `json:"journals"`
+	}
+	if e = json.Unmarshal(history[2], &oldest); e != nil || len(oldest.Journals) != 1 || oldest.Journals[0].ReversedBy == nil {
+		t.Fatal("history missing reversal link", oldest, e)
+	}
+	if _, e = db.History(ctx, domain.ID(), ledger.ID, req.EventID); e == nil {
+		t.Fatal("cross tenant history accepted")
+	}
 	if _, e = db.Accounts(ctx, domain.ID(), ledger.ID); e == nil {
 		t.Fatal("cross tenant read accepted")
 	}

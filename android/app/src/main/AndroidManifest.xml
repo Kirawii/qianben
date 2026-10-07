@@ -1,6 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
  <uses-permission android:name="android.permission.INTERNET" />
- <application android:name=".QianBenApp" android:label="钱本" android:icon="@drawable/ic_qianben" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:usesCleartextTraffic="false">
+ <application android:name=".QianBenApp" android:label="钱本" android:icon="@drawable/ic_qianben" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:theme="@style/QianBenTheme" android:usesCleartextTraffic="false">
   <activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
   <service android:name=".NotificationCollector" android:label="钱本支付通知采集" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" android:exported="true"><intent-filter><action android:name="android.service.notification.NotificationListenerService"/></intent-filter></service>
  </application>

@@ -14,6 +14,7 @@
 | POST | `.../observations` | 分项持久化 ACK 的通知批次 |
 | POST | `.../csv` | 有明确账户的 CSV 原子导入 |
 | GET | `.../evidence?event_id=...` | 原始版本化证据 |
+| GET | `.../history?event_id=...` | 最近 100 次接受的修订及分录，按修订号倒序 |
 | GET | `.../relations?event_id=...` | 当前经济与身份关系 |
 | POST | `.../merge` / `.../split` | 原子修复事件身份及账务 |
 | POST | `.../transfer` / `.../unlink-transfer` | 关联 / 解除转账两端 |
@@ -25,6 +26,8 @@
 | POST | `.../delete` | 输入 `confirm_name` 后删除该账本 |
 
 事件列表每页 500 条，按创建时间及 ID 倒序。`?before=<上一页最后一个事件 ID>` 读取更早记录。
+
+history 返回修订的 facts、evidence_ids、policy_version、source_version、created_at 和 journals。每个 journal 含 kind、effective_at、reversal_of、reversed_by、entries（账户名称及分的整数字符串）。修订产生的旧分录冲销属于该修订的 journals；旧正常分录通过 reversed_by 指向后续冲销。账户名称为当前显示名称，不是保存的历史名称。不存在事件返回 404，跨账本权限由服务端校验。
 
 报表 `core-v2` 新增 `assets_minor`、`liabilities_minor`、`net_worth_minor`（均截至排他的 to 时点，包含期初及系统暂记账户）、`income_minor`、`surplus_minor`（收入减会计费用）及 `categories:[{category,consumption_minor}]`。分类合计等于生活消费；未填分类归入“未分类”，退款按其发生月和接受的分类冲减，可为负值。余额是账面值，不表示银行对账或资产完整录入。所有金额仍为分的整数字符串。
 

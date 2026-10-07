@@ -58,6 +58,22 @@ object Vault {
     }
 }
 
+object NotificationSources {
+    val names =
+        linkedMapOf(
+            "com.tencent.mm" to "微信支付",
+            "com.eg.android.AlipayGphone" to "支付宝",
+            "com.unionpay" to "云闪付",
+            "com.icbc" to "工商银行",
+            "com.chinamworld.main" to "建设银行",
+            "com.chinamworld.bocmbci" to "中国银行",
+            "com.android.bankabc" to "农业银行",
+            "cmb.pb" to "招商银行",
+            "com.bankcomm.Bankcomm" to "交通银行",
+            "com.psbc.mbank" to "邮储银行",
+        )
+}
+
 class Settings(ctx: Context) {
     private val p = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
     var url: String
@@ -91,6 +107,14 @@ class Settings(ctx: Context) {
         get() = p.getBoolean("collect", false)
         set(v) {
             p.edit().putBoolean("collect", v).commit()
+        }
+
+    var notificationSources: Set<String>
+        get() = p.getStringSet("notification_sources", NotificationSources.names.keys)!!.toSet()
+        set(v) {
+            p.edit()
+                .putStringSet("notification_sources", v.intersect(NotificationSources.names.keys))
+                .commit()
         }
 
     var captureError: String

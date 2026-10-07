@@ -1,0 +1,8 @@
+<resources>
+    <style name="QianBenTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#A1D7BC</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#101B16</item>
+    </style>
+</resources>
