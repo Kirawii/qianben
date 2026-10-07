@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: qianben_admin
+      POSTGRES_PASSWORD: local-development-only
+      POSTGRES_DB: qianben
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - qianben_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qianben_admin -d qianben"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  qianben_pg:

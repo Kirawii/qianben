@@ -1,0 +1,3 @@
+record_id,occurred_at,amount_minor,kind,merchant,category
+synthetic-expense-001,2026-10-02T12:30:00+08:00,2350,EXPENSE,示例食堂,餐饮
+synthetic-income-001,2026-10-03T09:00:00+08:00,100000,INCOME,示例收入,收入

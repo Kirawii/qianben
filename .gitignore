@@ -37,3 +37,7 @@ coverage.out
 # Temporary files
 *.log
 *.tmp
+.tools/
+/artifacts/
+/backend/.cache/
+/android/.kotlin/
