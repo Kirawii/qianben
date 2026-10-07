@@ -4,29 +4,41 @@ import (
 	"context"
 	"github.com/Kirawii/qianben/backend/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"sort"
 	"strconv"
 	"time"
 )
 
 type Reports struct {
-	Version           int64         `json:"source_version"`
-	Algorithm         string        `json:"algorithm_version"`
-	From              time.Time     `json:"from"`
-	To                time.Time     `json:"to"`
-	Expense           domain.Amount `json:"expense_minor"`
-	Consumption       domain.Amount `json:"consumption_minor"`
-	CashChange        domain.Amount `json:"cash_change_minor"`
-	ExternalCash      domain.Amount `json:"external_cash_minor"`
-	InternalCash      domain.Amount `json:"internal_cash_minor"`
-	UnresolvedCash    domain.Amount `json:"unresolved_cash_minor"`
-	UnresolvedBalance domain.Amount `json:"unresolved_balance_minor"`
-	ReviewCount       int64         `json:"review_count"`
-	TransferClearing  domain.Amount `json:"transfer_clearing_minor"`
-	UnlinkedTransfers int64         `json:"unlinked_transfer_count"`
+	Assets            domain.Amount   `json:"assets_minor"`
+	Liabilities       domain.Amount   `json:"liabilities_minor"`
+	NetWorth          domain.Amount   `json:"net_worth_minor"`
+	Income            domain.Amount   `json:"income_minor"`
+	Surplus           domain.Amount   `json:"surplus_minor"`
+	Categories        []CategoryTotal `json:"categories"`
+	Version           int64           `json:"source_version"`
+	Algorithm         string          `json:"algorithm_version"`
+	From              time.Time       `json:"from"`
+	To                time.Time       `json:"to"`
+	Expense           domain.Amount   `json:"expense_minor"`
+	Consumption       domain.Amount   `json:"consumption_minor"`
+	CashChange        domain.Amount   `json:"cash_change_minor"`
+	ExternalCash      domain.Amount   `json:"external_cash_minor"`
+	InternalCash      domain.Amount   `json:"internal_cash_minor"`
+	UnresolvedCash    domain.Amount   `json:"unresolved_cash_minor"`
+	UnresolvedBalance domain.Amount   `json:"unresolved_balance_minor"`
+	ReviewCount       int64           `json:"review_count"`
+	TransferClearing  domain.Amount   `json:"transfer_clearing_minor"`
+	UnlinkedTransfers int64           `json:"unlinked_transfer_count"`
+}
+
+type CategoryTotal struct {
+	Category string        `json:"category"`
+	Amount   domain.Amount `json:"consumption_minor"`
 }
 
 func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Time) (Reports, error) {
-	r := Reports{From: from, To: to, Algorithm: "core-v1"}
+	r := Reports{From: from, To: to, Algorithm: "core-v2", Categories: []CategoryTotal{}}
 	if !from.Before(to) {
 		return r, domain.Invalid("报表时间范围无效")
 	}
@@ -40,16 +52,17 @@ func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Ti
 		return r, e
 	}
 	r.Version = l.Version
-	rows, e := tx.Query(ctx, `SELECT a.code,a.cash,(e.debit-e.credit)::text,j.effective_at,COALESCE(v.facts->>'kind','OPENING') FROM qb.entries e JOIN qb.accounts a ON a.id=e.account_id JOIN qb.journals j ON j.id=e.journal_id LEFT JOIN qb.journals original ON original.id=j.reversal_of JOIN qb.posting_revisions p ON p.id=COALESCE(original.posting_revision_id,j.posting_revision_id) LEFT JOIN qb.event_revisions v ON v.id=p.event_revision_id WHERE e.ledger_id=$1`, ledger)
+	rows, e := tx.Query(ctx, `SELECT a.code,a.cash,(e.debit-e.credit)::text,j.effective_at,COALESCE(v.facts->>'kind','OPENING'),COALESCE(NULLIF(v.facts->>'category',''),'未分类') FROM qb.entries e JOIN qb.accounts a ON a.id=e.account_id JOIN qb.journals j ON j.id=e.journal_id LEFT JOIN qb.journals original ON original.id=j.reversal_of JOIN qb.posting_revisions p ON p.id=COALESCE(original.posting_revision_id,j.posting_revision_id) LEFT JOIN qb.event_revisions v ON v.id=p.event_revision_id WHERE e.ledger_id=$1`, ledger)
 	if e != nil {
 		return r, e
 	}
 	var suspenseAsset, suspenseLiability domain.Amount
+	categories := map[string]domain.Amount{}
 	for rows.Next() {
-		var code, value, kind string
+		var code, value, kind, category string
 		var cash bool
 		var at time.Time
-		if e = rows.Scan(&code, &cash, &value, &at, &kind); e != nil {
+		if e = rows.Scan(&code, &cash, &value, &at, &kind, &category); e != nil {
 			rows.Close()
 			return r, e
 		}
@@ -79,6 +92,20 @@ func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Ti
 		}
 		if at.Before(from) || !at.Before(to) || kind == "OPENING" {
 			continue
+		}
+		if code == "income.general" {
+			r.Income, e = domain.Add(r.Income, -amount)
+			if e != nil {
+				rows.Close()
+				return r, e
+			}
+		}
+		if code == "expense.general" || code == "asset.fixed" {
+			categories[category], e = domain.Add(categories[category], amount)
+			if e != nil {
+				rows.Close()
+				return r, e
+			}
 		}
 		if code == "expense.general" {
 			if e = add(&r.Expense); e != nil {
@@ -116,6 +143,33 @@ func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Ti
 	}
 	e = rows.Err()
 	rows.Close()
+	if e != nil {
+		return r, e
+	}
+	for category, amount := range categories {
+		r.Categories = append(r.Categories, CategoryTotal{category, amount})
+	}
+	sort.Slice(r.Categories, func(i, j int) bool { return r.Categories[i].Category < r.Categories[j].Category })
+	r.Surplus, e = domain.Subtract(r.Income, r.Expense)
+	if e != nil {
+		return r, e
+	}
+	// Balance-sheet values are as of the exclusive period end, independent of period start.
+	var assets, liabilities string
+	e = tx.QueryRow(ctx, `SELECT COALESCE(sum(CASE WHEN a.type='ASSET' THEN e.debit::numeric-e.credit ELSE 0 END),0)::text,COALESCE(sum(CASE WHEN a.type='LIABILITY' THEN e.credit::numeric-e.debit ELSE 0 END),0)::text FROM qb.entries e JOIN qb.accounts a ON a.id=e.account_id JOIN qb.journals j ON j.id=e.journal_id WHERE e.ledger_id=$1 AND j.effective_at<$2`, ledger, to).Scan(&assets, &liabilities)
+	if e != nil {
+		return r, e
+	}
+	a, err := strconv.ParseInt(assets, 10, 64)
+	if err != nil {
+		return r, err
+	}
+	b, err := strconv.ParseInt(liabilities, 10, 64)
+	if err != nil {
+		return r, err
+	}
+	r.Assets, r.Liabilities = domain.Amount(a), domain.Amount(b)
+	r.NetWorth, e = domain.Subtract(r.Assets, r.Liabilities)
 	if e != nil {
 		return r, e
 	}

@@ -88,6 +88,41 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	ledger := parts[2]
 	switch parts[3] {
+	case "balance-checks":
+		switch r.Method {
+		case "GET":
+			v, e := s.DB.BalanceChecks(r.Context(), actor, ledger)
+			respond(w, v, e)
+		case "POST":
+			var req store.CheckRequest
+			if e = decode(w, r, &req); e != nil {
+				respond(w, nil, e)
+				return
+			}
+			v, e := s.DB.CheckBalance(r.Context(), actor, ledger, req)
+			respond(w, v, e)
+		default:
+			w.WriteHeader(405)
+		}
+	case "rules":
+		if r.Method != "GET" {
+			w.WriteHeader(405)
+			return
+		}
+		v, e := s.DB.Rules(r.Context(), actor, ledger)
+		respond(w, v, e)
+	case "revoke-rule":
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		var req store.RevokeRuleRequest
+		if e = decode(w, r, &req); e != nil {
+			respond(w, nil, e)
+			return
+		}
+		v, e := s.DB.RevokeRule(r.Context(), actor, ledger, req)
+		respond(w, v, e)
 	case "relations":
 		if r.Method != "GET" {
 			w.WriteHeader(405)

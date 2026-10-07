@@ -29,6 +29,12 @@ func Add(a, b Amount) (Amount, error) {
 	}
 	return a + b, nil
 }
+func Subtract(a, b Amount) (Amount, error) {
+	if (b > 0 && a < Amount(math.MinInt64)+b) || (b < 0 && a > Amount(math.MaxInt64)+b) {
+		return 0, errors.New("amount overflow")
+	}
+	return a - b, nil
+}
 func ID() string {
 	b := make([]byte, 16)
 	if _, e := rand.Read(b); e != nil {

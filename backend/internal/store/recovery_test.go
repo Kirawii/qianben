@@ -157,6 +157,10 @@ func TestEvidenceAndRepair(t *testing.T) {
 	if _, e = db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: credit}); e != nil {
 		t.Fatal(e)
 	}
+	r, e = db.Reports(ctx, actor, l.ID, cut, observed.Add(time.Hour))
+	if e != nil || r.Assets != 9000 || r.Liabilities != 500 || r.NetWorth != 8500 {
+		t.Fatal("credit balance sheet", r, e)
+	}
 	repay := f
 	repay.Kind = "CARD_REPAYMENT"
 	repay.Amount = 500
@@ -167,6 +171,9 @@ func TestEvidenceAndRepair(t *testing.T) {
 	r, e = db.Reports(ctx, actor, l.ID, cut, observed.Add(time.Hour))
 	if e != nil || r.Consumption != 1500 || r.CashChange != -1500 || r.InternalCash != -500 {
 		t.Fatal("credit repayment must not count consumption twice", r, e)
+	}
+	if r.Assets != 8500 || r.Liabilities != 0 || r.NetWorth != 8500 {
+		t.Fatal("repayment changed net worth", r)
 	}
 	csvReq := CSVRequest{CommandID: domain.ID(), AccountID: a.ID, Content: "record_id,occurred_at,amount_minor,kind,merchant,category\nfixture-csv," + observed.Format(time.RFC3339) + ",100,EXPENSE,Test,Cafe\n"}
 	if _, e = db.ImportCSV(ctx, actor, l.ID, csvReq); e != nil {

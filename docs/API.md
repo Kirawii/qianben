@@ -19,9 +19,18 @@
 | POST | `.../transfer` / `.../unlink-transfer` | 关联 / 解除转账两端 |
 | GET | `.../reports?from=...&to=...` | 同版本三套视图，左闭右开时间范围 |
 | GET | `.../assets` | 用户确认的固定资产购置与退款后原值 |
+| GET | `.../rules` | 商户分类规则及失效历史 |
+| POST | `.../revoke-rule` | 固定 command_id、rule_id、expected_version 撤销规则 |
+| GET / POST | `.../balance-checks` | 最近 100 条余额检查 / 保存同一时点比较 |
 | POST | `.../delete` | 输入 `confirm_name` 后删除该账本 |
 
 事件列表每页 500 条，按创建时间及 ID 倒序。`?before=<上一页最后一个事件 ID>` 读取更早记录。
+
+报表 `core-v2` 新增 `assets_minor`、`liabilities_minor`、`net_worth_minor`（均截至排他的 to 时点，包含期初及系统暂记账户）、`income_minor`、`surplus_minor`（收入减会计费用）及 `categories:[{category,consumption_minor}]`。分类合计等于生活消费；未填分类归入“未分类”，退款按其发生月和接受的分类冲减，可为负值。余额是账面值，不表示银行对账或资产完整录入。所有金额仍为分的整数字符串。
+
+规则撤销不修改已接受事件，不自动恢复旧规则；版本过期或已失效返回 409，同一成功 command 重试返回原结果。
+
+余额检查 POST 参数为 `command_id,account_id,as_of,actual_minor`。检查时间须在启用时点至当前时间内；余额为分的整数字符串，信用卡以欠款为正。返回 `id,account_id,as_of,actual_minor,book_minor,difference_minor,source_version`；差额为实际减账面，账面取 effective_at <= as_of 的全部分录，包括期初。仅保存比较，不写 Journal。source_version 是记录写入后的账本版本，之后新增或修订流水可能使历史结果过时。差额为零也不表示外部账单覆盖完整。
 
 ## 写命令
 

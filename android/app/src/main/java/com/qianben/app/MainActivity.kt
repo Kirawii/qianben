@@ -24,6 +24,7 @@ class MainActivity : Activity() {
     private var page = "首页"
     private var csvAccount = ""
     private var eventCursor = ""
+    private var reportMonth = java.time.YearMonth.now()
     private val ink = Color.rgb(30, 49, 43)
 
     override fun onCreate(state: Bundle?) {
@@ -324,6 +325,7 @@ class MainActivity : Activity() {
                     }
                 }
             }
+            button("管理商户分类规则") { rulePage() }
             button("删除当前账本") {
                 val input = EditText(this).apply { hint = "输入完整账本名称" }
                 AlertDialog.Builder(this)
@@ -416,11 +418,19 @@ class MainActivity : Activity() {
     }
 
     private fun home() {
-        label("本月概览", 22f)
+        label("${reportMonth} 财务概览", 22f)
+        button("上个月") {
+            reportMonth = reportMonth.minusMonths(1)
+            render()
+        }
+        button("下个月") {
+            reportMonth = reportMonth.plusMonths(1)
+            render()
+        }
         val zone = ZoneId.systemDefault()
-        val now = ZonedDateTime.now(zone)
-        val from = now.withDayOfMonth(1).toLocalDate().atStartOfDay(zone).toInstant()
-        val to = now.withDayOfMonth(1).plusMonths(1).toLocalDate().atStartOfDay(zone).toInstant()
+        val selectedMonth = reportMonth
+        val from = selectedMonth.atDay(1).atStartOfDay(zone).toInstant()
+        val to = selectedMonth.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant()
         task {
             val r =
                 JSONObject(
@@ -429,7 +439,17 @@ class MainActivity : Activity() {
                     )
                 )
             runOnUiThread {
-                if (page != "首页") return@runOnUiThread
+                if (page != "首页" || reportMonth != selectedMonth) return@runOnUiThread
+                label("期末账面净资产   ¥ ${money(r.getString("net_worth_minor"))}", 24f)
+                label(
+                    "资产：${money(r.getString("assets_minor"))} · 负债：${money(r.getString("liabilities_minor"))}",
+                    18f,
+                )
+                label("包含待查、应收与转账在途；未与银行核对。未录入账户和期初会影响完整性。", 14f)
+                label(
+                    "会计收入   ¥ ${money(r.getString("income_minor"))}\n会计结余   ¥ ${money(r.getString("surplus_minor"))}",
+                    20f,
+                )
                 label("生活消费   ¥ ${money(r.getString("consumption_minor"))}", 24f)
                 label("会计费用   ¥ ${money(r.getString("expense_minor"))}", 20f)
                 label("现金变动   ¥ ${money(r.getString("cash_change_minor"))}", 20f)
@@ -449,7 +469,56 @@ class MainActivity : Activity() {
                     "账本版本 ${r.getLong("source_version")} · ${r.getString("algorithm_version")}",
                     12f,
                 )
+                label("生活消费分类（退款按发生月冲减）", 18f)
+                val totals = r.getJSONArray("categories")
+                for (i in 0 until totals.length()) {
+                    val total = totals.getJSONObject(i)
+                    label(
+                        "${total.getString("category")}   ¥ ${money(total.getString("consumption_minor"))}",
+                        16f,
+                    )
+                }
                 button("刷新") { reload() }
+            }
+        }
+    }
+
+    private fun rulePage() {
+        content.removeAllViews()
+        label("商户分类规则", 22f)
+        label("只影响之后的新证据，不重写历史。撤销后旧规则不会自动恢复。", 14f)
+        button("返回设置") { render() }
+        task {
+            val rules = JSONArray(api("rules"))
+            runOnUiThread {
+                if (page != "设置") return@runOnUiThread
+                if (rules.length() == 0) label("尚无分类规则；确认事件时可勾选记住商户分类。")
+                for (i in 0 until rules.length()) {
+                    val rule = rules.getJSONObject(i)
+                    label(
+                        "${rule.getString("merchant")} → ${rule.getString("category")} · v${rule.getLong("version")} · ${if(rule.getBoolean("active")) "生效" else "已失效"}"
+                    )
+                    if (rule.getBoolean("active"))
+                        button("撤销该规则") {
+                            AlertDialog.Builder(this)
+                                .setTitle("撤销 ${rule.getString("merchant")} 的分类规则？")
+                                .setMessage("历史事件保持原分类，之后的新证据不再使用此规则。")
+                                .setNegativeButton("取消", null)
+                                .setPositiveButton("撤销") { _, _ ->
+                                    task {
+                                        api(
+                                            "revoke-rule",
+                                            JSONObject()
+                                                .put("command_id", id())
+                                                .put("rule_id", rule.getString("id"))
+                                                .put("expected_version", rule.getLong("version")),
+                                        )
+                                        runOnUiThread { rulePage() }
+                                    }
+                                }
+                                .show()
+                        }
+                }
             }
         }
     }
@@ -461,6 +530,29 @@ class MainActivity : Activity() {
             if (!a.getString("code").startsWith("user.")) continue
             label("${a.getString("name")}   ¥ ${money(a.getString("balance_minor"))}", 18f)
             if (!a.getBoolean("initialized")) button("设置 ${a.getString("name")} 的期初") { opening(a) }
+            else button("检查 ${a.getString("name")} 的实际余额") { balanceCheck(a) }
+        }
+        button("查看余额检查记录") {
+            task {
+                val checks = JSONArray(api("balance-checks"))
+                runOnUiThread {
+                    val text =
+                        (0 until checks.length()).joinToString("\n\n") {
+                            val c = checks.getJSONObject(it)
+                            val name =
+                                (0 until accounts.length())
+                                    .map { n -> accounts.getJSONObject(n) }
+                                    .firstOrNull { it.getString("id") == c.getString("account_id") }
+                                    ?.getString("name") ?: "账户"
+                            "$name · ${displayTime(c.getString("as_of"))}\n实际 ${money(c.getString("actual_minor"))} · 账面 ${money(c.getString("book_minor"))} · 差额 ${money(c.getString("difference_minor"))}\n记录版本 ${c.getLong("source_version")}，之后的修订可能使结果过时。"
+                        }
+                    AlertDialog.Builder(this)
+                        .setTitle("最近 100 条余额检查")
+                        .setMessage(text.ifBlank { "尚无检查记录" })
+                        .setPositiveButton("关闭", null)
+                        .show()
+                }
+            }
         }
         val name = field("账户名称")
         val type = spinner("账户类型", listOf("现金 / 银行卡 / 钱包余额", "信用卡负债"))
@@ -482,6 +574,43 @@ class MainActivity : Activity() {
                 reload()
             }
         }
+    }
+
+    private fun balanceCheck(a: JSONObject) {
+        content.removeAllViews()
+        label("${a.getString("name")} · 余额检查", 22f)
+        label(
+            "输入同一时点的实际${if(a.getString("type") == "LIABILITY") "欠款（欠款为正）" else "余额"}。仅保存比较结果，不调整账务，也不代表完整银行对账。",
+            14f,
+        )
+        val actual = field("实际金额（元；可输入负值）")
+        val at = field("检查时点（年-月-日 时:分:秒）", displayTime(Instant.now().toString()))
+        val command = id()
+        button("保存检查") {
+            task {
+                val result =
+                    JSONObject(
+                        api(
+                            "balance-checks",
+                            JSONObject()
+                                .put("command_id", command)
+                                .put("account_id", a.getString("id"))
+                                .put("as_of", instant(at.text.toString()))
+                                .put("actual_minor", minor(actual.text.toString())),
+                        )
+                    )
+                runOnUiThread {
+                    AlertDialog.Builder(this)
+                        .setTitle("余额比较结果")
+                        .setMessage(
+                            "账面：${money(result.getString("book_minor"))} 元\n实际：${money(result.getString("actual_minor"))} 元\n差额（实际减账面）：${money(result.getString("difference_minor"))} 元\n如有差额，请检查遗漏流水、待查款或期初。账务未调整。"
+                        )
+                        .setPositiveButton("关闭") { _, _ -> render() }
+                        .show()
+                }
+            }
+        }
+        button("返回账户") { render() }
     }
 
     private fun opening(a: JSONObject) {

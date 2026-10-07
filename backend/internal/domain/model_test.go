@@ -26,4 +26,13 @@ func TestMoneyWireAndLimits(t *testing.T) {
 	if _, e := Add(Amount(math.MinInt64), -1); e == nil {
 		t.Fatal("negative overflow")
 	}
+	if _, e := Subtract(0, Amount(math.MinInt64)); e == nil {
+		t.Fatal("minimum integer subtraction overflow")
+	}
+	if n, e := Subtract(-1, Amount(math.MinInt64)); e != nil || n != Amount(math.MaxInt64) {
+		t.Fatal("valid subtraction boundary", n, e)
+	}
+	if _, e := Subtract(Amount(math.MinInt64), 1); e == nil {
+		t.Fatal("subtraction negative overflow")
+	}
 }
