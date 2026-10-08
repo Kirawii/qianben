@@ -69,16 +69,19 @@ type Ledger struct {
 	Status   string    `json:"status"`
 }
 type Account struct {
-	ID          string `json:"id"`
-	Code        string `json:"code"`
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	Cash        bool   `json:"cash"`
-	Initialized bool   `json:"initialized"`
-	Revision    int64  `json:"revision"`
-	Provider    string `json:"provider"`
-	MaskedRef   string `json:"masked_ref"`
-	Balance     Amount `json:"balance_minor"`
+	ID                 string     `json:"id"`
+	Code               string     `json:"code"`
+	Name               string     `json:"name"`
+	Type               string     `json:"type"`
+	Cash               bool       `json:"cash"`
+	Initialized        bool       `json:"initialized"`
+	Revision           int64      `json:"revision"`
+	Provider           string     `json:"provider"`
+	MaskedRef          string     `json:"masked_ref"`
+	Balance            Amount     `json:"balance_minor"`
+	BookAsOf           *time.Time `json:"book_as_of,omitempty"`
+	EvidenceReceivedAt *time.Time `json:"evidence_received_at,omitempty"`
+	LastBalanceCheckAt *time.Time `json:"last_balance_check_at,omitempty"`
 }
 type Facts struct {
 	Kind               string     `json:"kind"`

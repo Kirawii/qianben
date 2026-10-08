@@ -237,4 +237,94 @@ func TestEvidenceAndRepair(t *testing.T) {
 	if e != nil || r.TransferClearing != 0 || r.CashChange != -1600 || r.InternalCash != -500 {
 		t.Fatal("transfer full-window report", r, e)
 	}
+	// Candidate queries inspect immutable evidence across the whole cluster.
+	notify := func(pkg, title string) domain.Delivery {
+		item := delivery
+		item.DeliveryID, item.SourceObjectKey = domain.ID(), domain.ID()
+		item.SnapshotKey = "candidate:1"
+		item.CaptureSequence = 1
+		item.Package, item.SourceIdentity, item.Title = pkg, "android.notification:"+pkg, title
+		item.Text = "支付成功人民币7.77元"
+		if _, err := db.Ingest(ctx, actor, l.ID, []domain.Delivery{item}); err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+	drain := func() {
+		t.Helper()
+		for i := 0; i < 1000; i++ {
+			worked, err := db.Work(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !worked {
+				return
+			}
+		}
+		t.Fatal("candidate outbox did not drain")
+	}
+	notify("com.icbc", "候选银行卡")
+	notify("com.tencent.mm", "微信支付")
+	drain()
+	events, e = db.Events(ctx, actor, l.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var payment domain.Event
+	for _, ev := range events {
+		if ev.Facts.Merchant == "微信支付" && ev.Facts.Amount == 777 {
+			payment = ev
+		}
+	}
+	if payment.ID == "" {
+		t.Fatal("candidate payment not interpreted")
+	}
+	pendingHistory, err := db.History(ctx, actor, l.ID, payment.ID)
+	if err != nil || len(pendingHistory) != 1 {
+		t.Fatal("pending history", pendingHistory, err)
+	}
+	var pendingVersion struct {
+		AccountingRevision *int64 `json:"accounting_revision"`
+	}
+	if err = json.Unmarshal(pendingHistory[0], &pendingVersion); err != nil || pendingVersion.AccountingRevision != nil {
+		t.Fatal("unposted revision claimed inherited journal", pendingVersion, err)
+	}
+	candidates, e := db.DuplicateCandidates(ctx, actor, l.ID, payment.ID)
+	if e != nil || len(candidates.Candidates) != 1 || candidates.Ambiguous || candidates.Truncated {
+		t.Fatal("cross-source candidate query", candidates, e)
+	}
+	bankCandidate := candidates.Candidates[0].Event
+	notify("com.icbc", "第二笔真实同额扣款")
+	drain()
+	candidates, e = db.DuplicateCandidates(ctx, actor, l.ID, payment.ID)
+	if e != nil || len(candidates.Candidates) != 2 || !candidates.Ambiguous {
+		t.Fatal("ambiguous equal payments", candidates, e)
+	}
+	if _, e = db.DuplicateCandidates(ctx, domain.ID(), l.ID, payment.ID); e == nil {
+		t.Fatal("cross-user candidate read")
+	}
+	raw, e = db.Merge(ctx, actor, l.ID, MergeRequest{CommandID: domain.ID(), SourceID: bankCandidate.ID, TargetID: payment.ID, SourceRevision: bankCandidate.Revision, TargetRevision: payment.Revision})
+	if e != nil {
+		t.Fatal(e)
+	}
+	candidates, e = db.DuplicateCandidates(ctx, actor, l.ID, payment.ID)
+	if e != nil || len(candidates.Candidates) != 0 {
+		t.Fatal("whole cluster conflict did not veto second bank transaction", candidates, e)
+	}
+	if _, e = admin.Pool.Exec(ctx, `UPDATE qb.events SET created_at=now()-interval '8 days' WHERE ledger_id=$1 AND id=$2`, l.ID, payment.ID); e != nil {
+		t.Fatal(e)
+	}
+	qualityRaw, e := db.Quality(ctx, actor, l.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var quality struct {
+		Review  int64             `json:"review_count"`
+		Old     int64             `json:"review_older_than_7d_count"`
+		CSV     int64             `json:"csv_evidence_count"`
+		Reasons []json.RawMessage `json:"review_reasons"`
+	}
+	if e = json.Unmarshal(qualityRaw, &quality); e != nil || quality.Review != 2 || quality.Old != 1 || quality.CSV != 1 || len(quality.Reasons) == 0 {
+		t.Fatal("quality aging and import evidence", quality, e)
+	}
 }

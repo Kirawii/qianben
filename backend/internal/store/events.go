@@ -7,6 +7,7 @@ import (
 	"github.com/Kirawii/qianben/backend/internal/accounting"
 	"github.com/Kirawii/qianben/backend/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -100,6 +101,22 @@ func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revi
 			return ev, domain.Invalid("累计退款超过原消费")
 		}
 	}
+	unchangedAccounting := false
+	if revision > 0 && len(p.Entries) > 0 {
+		old, err := eventTx(ctx, tx, l.ID, id)
+		if err != nil {
+			return ev, err
+		}
+		normalize := func(f domain.Facts) domain.Facts {
+			f.Category, f.Merchant, f.Note, f.AssetTitle = "", "", "", ""
+			if f.OccurredAt != nil {
+				at := f.OccurredAt.UTC()
+				f.OccurredAt = &at
+			}
+			return f
+		}
+		unchangedAccounting = old.Posted && reflect.DeepEqual(normalize(old.Facts), normalize(f))
+	}
 	rid := domain.ID()
 	policyVersion := "core-v1"
 	if len(policy) > 0 {
@@ -107,6 +124,15 @@ func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revi
 	}
 	_, e = tx.Exec(ctx, `INSERT INTO qb.event_revisions(id,ledger_id,event_id,number,facts,evidence_ids,committed_version,policy_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, rid, l.ID, id, ev.Revision, domain.Hashable(f), domain.Hashable(ev.EvidenceIDs), l.Version+1, policyVersion)
 	if e != nil {
+		return ev, e
+	}
+	if unchangedAccounting {
+		ev.Posted = true
+		_, e = tx.Exec(ctx, `UPDATE qb.assets SET title=$3 WHERE ledger_id=$1 AND event_id=$2`, l.ID, id, f.AssetTitle)
+		if e != nil {
+			return ev, e
+		}
+		_, e = tx.Exec(ctx, `UPDATE qb.events SET revision=$3,current_revision_id=$4,status=$5,review_reason=$6 WHERE ledger_id=$1 AND id=$2`, l.ID, id, ev.Revision, rid, ev.Status, ev.Reason)
 		return ev, e
 	}
 	if p.Entries == nil {
@@ -177,7 +203,7 @@ func (d *DB) SaveEvent(ctx context.Context, actor, ledger string, r EventRequest
 			}
 			ids = old.EvidenceIDs
 			var linked bool
-			err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM qb.relations WHERE ledger_id=$1 AND active AND ((to_event=$2 AND type IN ('REFUND_OF','REIMBURSES')) OR (type='TRANSFER_LEG_OF' AND (from_event=$2 OR to_event=$2))))`, l.ID, r.EventID).Scan(&linked)
+			err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM qb.relations WHERE ledger_id=$1 AND active AND ((to_event=$2 AND type='REFUND_OF') OR (type='REIMBURSES' AND (from_event=$2 OR to_event=$2)) OR (type='TRANSFER_LEG_OF' AND (from_event=$2 OR to_event=$2))))`, l.ID, r.EventID).Scan(&linked)
 			if err != nil {
 				return nil, err
 			}

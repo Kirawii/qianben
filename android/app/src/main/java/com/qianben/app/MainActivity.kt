@@ -24,6 +24,7 @@ import org.json.JSONObject
 class MainActivity : Activity() {
     private lateinit var settings: Settings
     private lateinit var content: LinearLayout
+    private lateinit var cacheBanner: TextView
     private var accounts = JSONArray()
     private var ledgers = JSONArray()
     private var eventCache = JSONArray()
@@ -56,6 +57,7 @@ class MainActivity : Activity() {
         get() = Color.parseColor(if (night) "#35453C" else "#DDE5DD")
 
     private var screenGeneration = 0
+    private var loadedFromCache = false
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
@@ -68,7 +70,7 @@ class MainActivity : Activity() {
         window.navigationBarColor = surface
         settings = Settings(this)
         render()
-        if (settings.token.isNotBlank()) reload()
+        if (settings.token.isNotBlank()) reload(preferCache = true)
     }
 
     private fun id() = UUID.randomUUID().toString()
@@ -220,24 +222,25 @@ class MainActivity : Activity() {
                 "HISTORICAL_ONLY" -> "启用时间前的历史记录"
                 else -> if (ev.optBoolean("posted")) "已更新余额，仍待确认" else "未入账，待确认"
             }
-        val reason =
-            when (ev.optString("review_reason")) {
-                "PURPOSE_REQUIRED" -> "请确认用途"
-                "EVENT_TIME_REQUIRED" -> "请补实际发生时间"
-                "AMOUNT_REQUIRED" -> "请核对金额"
-                "FUNDING_ACCOUNT_UNKNOWN" -> "请选择实际账户"
-                "ACCOUNT_NOT_INITIALIZED" -> "账户尚未设置期初"
-                "CNY_SETTLEMENT_REQUIRED" -> "需要实际人民币结算信息"
-                "CUTOVER_TIME_AMBIGUOUS" -> "请明确与启用时点的先后关系"
-                "NEW_EVIDENCE_REVIEW" -> "收到新证据，请核对"
-                "REFUND_ORIGINAL_REQUIRED" -> "请关联退款原消费"
-                "ASSET_CONFIRMATION_REQUIRED" -> "请确认资产名称"
-                "REPAYMENT_TARGET_REQUIRED" -> "请选择还款目标"
-                "FINAL_FINANCIAL_STATE_REQUIRED" -> "请确认最终交易状态"
-                else -> ""
-            }
-        return "$state  $reason"
+        return "$state  ${reviewReason(ev.optString("review_reason"))}"
     }
+
+    private fun reviewReason(code: String): String =
+        when (code) {
+            "PURPOSE_REQUIRED" -> "请确认用途"
+            "EVENT_TIME_REQUIRED" -> "请补实际发生时间"
+            "AMOUNT_REQUIRED" -> "请核对金额"
+            "FUNDING_ACCOUNT_UNKNOWN" -> "请选择实际账户"
+            "ACCOUNT_NOT_INITIALIZED" -> "账户尚未设置期初"
+            "CNY_SETTLEMENT_REQUIRED" -> "需要实际人民币结算信息"
+            "CUTOVER_TIME_AMBIGUOUS" -> "请明确与启用时点的先后关系"
+            "NEW_EVIDENCE_REVIEW" -> "收到新证据，请核对"
+            "REFUND_ORIGINAL_REQUIRED" -> "请关联退款原消费"
+            "ASSET_CONFIRMATION_REQUIRED" -> "请确认资产名称"
+            "REPAYMENT_TARGET_REQUIRED" -> "请选择还款目标"
+            "FINAL_FINANCIAL_STATE_REQUIRED" -> "请确认最终交易状态"
+            else -> ""
+        }
 
     private fun task(work: () -> Unit) {
         QianBenApp.io.execute {
@@ -245,6 +248,16 @@ class MainActivity : Activity() {
                 work()
             } catch (e: Exception) {
                 runOnUiThread {
+                    if (e is ApiFailure && e.status in listOf(401, 403)) {
+                        accounts = JSONArray()
+                        eventCache = JSONArray()
+                        ledgers = JSONArray()
+                        settings.ledger = ""
+                        settings.offline = false
+                        loadedFromCache = false
+                        page = "设置"
+                        render()
+                    }
                     AlertDialog.Builder(this)
                         .setTitle("操作未完成")
                         .setMessage(e.message ?: "请检查连接后重试")
@@ -255,10 +268,26 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun api(resource: String, body: JSONObject? = null) =
-        if (body?.has("command_id") == true)
-            Api.command(this, settings, "/v1/ledgers/${settings.ledger}/$resource", body)
-        else Api.request(settings, "/v1/ledgers/${settings.ledger}/$resource", body)
+    private fun api(resource: String, body: JSONObject? = null): String {
+        val result =
+            if (body?.has("command_id") == true)
+                Api.command(this, settings, "/v1/ledgers/${settings.ledger}/$resource", body)
+            else {
+                val path = "/v1/ledgers/${settings.ledger}/$resource"
+                (if (body == null && settings.offline) Api.cached(settings, path) else null)
+                    ?: Api.request(settings, path, body)
+            }
+        if (settings.offline) loadedFromCache = true
+        runOnUiThread { updateCacheBanner() }
+        return result
+    }
+
+    private fun updateCacheBanner() {
+        if (!::cacheBanner.isInitialized) return
+        cacheBanner.visibility =
+            if (settings.offline || loadedFromCache) android.view.View.VISIBLE else android.view.View.GONE
+        cacheBanner.text = "本机缓存 · 保存于 ${displayTime(settings.cachedAt)}，尚未联网核验。各页面可能不同步，点击刷新账本。"
+    }
 
     private fun render() {
         screenGeneration++
@@ -291,6 +320,17 @@ class MainActivity : Activity() {
                 setTextColor(ink)
             }
         )
+        cacheBanner =
+            TextView(this).apply {
+                textSize = 12f
+                setTextColor(muted)
+                setPadding(dp(24), dp(4), dp(24), dp(8))
+                minimumHeight = dp(48)
+                contentDescription = "本机缓存，点击刷新账本"
+                setOnClickListener { reload() }
+            }
+        root.addView(cacheBanner)
+        updateCacheBanner()
         val tabs = LinearLayout(this)
         tabs.setPadding(dp(12), dp(8), dp(12), dp(8))
         tabs.setBackgroundColor(surface)
@@ -366,8 +406,19 @@ class MainActivity : Activity() {
                 require(url.text.toString().startsWith("https://") || BuildConfig.DEBUG) {
                     "正式版需要 HTTPS"
                 }
-                settings.url = url.text.toString()
-                settings.token = token.text.toString()
+                val newUrl = url.text.toString().trimEnd('/')
+                val newToken = token.text.toString()
+                if (settings.url != newUrl || settings.token != newToken) {
+                    settings.ledger = ""
+                    accounts = JSONArray()
+                    eventCache = JSONArray()
+                    ledgers = JSONArray()
+                    eventCursor = ""
+                    settings.offline = false
+                    loadedFromCache = false
+                }
+                settings.url = newUrl
+                settings.token = newToken
                 reload()
             }
         }
@@ -475,6 +526,7 @@ class MainActivity : Activity() {
                 }
             }
             button("管理商户分类规则") { rulePage() }
+            button("查看数据质量") { qualityPage() }
             button("删除当前账本") {
                 val input = EditText(this).apply { hint = "输入完整账本名称" }
                 AlertDialog.Builder(this)
@@ -527,15 +579,57 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun reload() {
+    private fun reportResource(month: java.time.YearMonth = reportMonth): String {
+        val zone = ZoneId.systemDefault()
+        val from = month.atDay(1).atStartOfDay(zone).toInstant()
+        val to = month.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant()
+        return "reports?from=${java.net.URLEncoder.encode(from.toString(), "UTF-8")}&to=${java.net.URLEncoder.encode(to.toString(), "UTF-8")}"
+    }
+
+    private fun reload(preferCache: Boolean = false) {
         task {
+            if (preferCache && settings.ledger.isNotBlank()) {
+                val cachedLedgers = Api.cached(settings, "/v1/ledgers")
+                val cachedAccounts = Api.cached(settings, "/v1/ledgers/${settings.ledger}/accounts")
+                val cachedEvents = Api.cached(settings, "/v1/ledgers/${settings.ledger}/events")
+                val cachedReport =
+                    Api.cached(settings, "/v1/ledgers/${settings.ledger}/${reportResource()}")
+                if (
+                    cachedLedgers != null &&
+                        cachedAccounts != null &&
+                        cachedEvents != null &&
+                        cachedReport != null
+                ) {
+                    ledgers = JSONArray(cachedLedgers)
+                    accounts = JSONArray(cachedAccounts)
+                    eventCache = JSONArray(cachedEvents)
+                    loadedFromCache = true
+                    runOnUiThread {
+                        render()
+                        reload()
+                    }
+                    return@task
+                }
+            }
+            settings.offline = false
             ledgers = JSONArray(Api.request(settings, "/v1/ledgers"))
-            if (settings.ledger.isBlank() && ledgers.length() > 0)
-                settings.ledger = ledgers.getJSONObject(0).getString("id")
+            if (
+                (0 until ledgers.length()).none {
+                    ledgers.getJSONObject(it).getString("id") == settings.ledger
+                }
+            )
+                settings.ledger =
+                    if (ledgers.length() > 0) ledgers.getJSONObject(0).getString("id") else ""
+            if (settings.ledger.isBlank()) {
+                accounts = JSONArray()
+                eventCache = JSONArray()
+            }
             if (settings.ledger.isNotBlank()) {
                 accounts = JSONArray(api("accounts"))
                 eventCache = JSONArray(api("events"))
+                api(reportResource())
             }
+            loadedFromCache = settings.offline
             runOnUiThread { render() }
         }
     }
@@ -567,6 +661,10 @@ class MainActivity : Activity() {
     }
 
     private fun home() {
+        if (ledgers.length() == 0) {
+            label("正在读取账本…", 14f)
+            return
+        }
         val generation = screenGeneration
         val controls = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         fun monthButton(title: String, step: Long) =
@@ -598,18 +696,11 @@ class MainActivity : Activity() {
         content.addView(controls, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(18) })
         val loading = textView("正在读取账本…", 14f, muted)
         content.addView(loading)
-        val zone = ZoneId.systemDefault()
         val selectedMonth = reportMonth
-        val from = selectedMonth.atDay(1).atStartOfDay(zone).toInstant()
-        val to = selectedMonth.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant()
         task {
             val r =
                 try {
-                    JSONObject(
-                        api(
-                            "reports?from=${java.net.URLEncoder.encode(from.toString(),"UTF-8")}&to=${java.net.URLEncoder.encode(to.toString(),"UTF-8")}"
-                        )
-                    )
+                    JSONObject(api(reportResource(selectedMonth)))
                 } catch (e: Exception) {
                     runOnUiThread {
                         if (generation == screenGeneration) {
@@ -628,7 +719,10 @@ class MainActivity : Activity() {
                     label("¥ ${money(r.getString("net_worth_minor"))}", 34f)
                     val row = LinearLayout(this)
                     for ((title, key) in
-                        listOf("资产" to "assets_minor", "负债" to "liabilities_minor")) {
+                        listOf(
+                            "已确认资产" to "confirmed_assets_minor",
+                            "已确认负债" to "confirmed_liabilities_minor",
+                        )) {
                         row.addView(
                             LinearLayout(this).apply {
                                 orientation = LinearLayout.VERTICAL
@@ -643,7 +737,11 @@ class MainActivity : Activity() {
                         )
                     }
                     content.addView(row)
-                    label("包含应收、待查与在途，尚未与银行核对。", 12f)
+                    label("已确认净资产 ¥ ${money(r.getString("confirmed_net_worth_minor"))}", 14f)
+                    label(
+                        "待查对账面净资产的暂定影响 ¥ ${money(r.getString("provisional_net_worth_minor"))}。在途款包含在账面资产中，尚未与银行核对。",
+                        12f,
+                    )
                 }
                 val metrics = LinearLayout(this)
                 for ((title, key) in
@@ -776,6 +874,13 @@ class MainActivity : Activity() {
             card {
                 label("${a.getString("name")}   ¥ ${money(a.getString("balance_minor"))}", 18f)
                 label(if (a.getString("type") == "LIABILITY") "信用卡 · 欠款为正" else "实际账户 · 账面余额", 13f)
+                if (!a.isNull("book_as_of"))
+                    label("最后分录发生于 ${displayTime(a.getString("book_as_of"))}", 12f)
+                if (!a.isNull("evidence_received_at"))
+                    label("最近相关证据收到于 ${displayTime(a.getString("evidence_received_at"))}", 12f)
+                if (!a.isNull("last_balance_check_at"))
+                    label("最近余额检查时点 ${displayTime(a.getString("last_balance_check_at"))}", 12f)
+                else label("尚无实际余额检查记录", 12f)
                 if (!a.getBoolean("initialized"))
                     button("设置 ${a.getString("name")} 的期初") { opening(a) }
                 else button("检查 ${a.getString("name")} 的实际余额") { balanceCheck(a) }
@@ -1165,9 +1270,11 @@ class MainActivity : Activity() {
                         val choices = mutableListOf("查看证据", "查看修订历史")
                         if (ev.getString("status") !in listOf("MERGED", "SPLIT")) {
                             choices.addAll(listOf("合并重复事件", "拆分为两笔"))
+                            choices.add("查看重复候选")
                             if (f.optString("kind") == "TRANSFER_OUT") choices.add("关联转入端")
                             if (f.optString("kind") in listOf("TRANSFER_OUT", "TRANSFER_IN"))
                                 choices.add("解除转账关联")
+                            if (f.optString("kind") == "REIMBURSEMENT") choices.add("分配报销回款")
                         }
                         AlertDialog.Builder(this)
                             .setTitle("事件操作")
@@ -1192,6 +1299,8 @@ class MainActivity : Activity() {
                                     "拆分为两笔" -> splitDialog(ev)
                                     "关联转入端" -> transferDialog(ev, events)
                                     "解除转账关联" -> unlinkTransferDialog(ev)
+                                    "分配报销回款" -> reimbursementPage(ev)
+                                    "查看重复候选" -> duplicateCandidatesPage(ev)
                                 }
                             }
                             .show()
@@ -1202,6 +1311,216 @@ class MainActivity : Activity() {
                         eventCursor = events.getJSONObject(events.length() - 1).getString("id")
                         render()
                     }
+            }
+        }
+    }
+
+    private fun qualityPage() {
+        screenGeneration++
+        val generation = screenGeneration
+        content.removeAllViews()
+        label("数据质量", 22f)
+        button("返回") { render() }
+        task {
+            val quality = JSONObject(api("quality"))
+            runOnUiThread {
+                if (generation != screenGeneration) return@runOnUiThread
+                card {
+                    label("${quality.getLong("posted_count")} 笔已有正式分录", 18f)
+                    label(
+                        "其中 ${quality.getLong("automatic_posted_count")} 笔无需手动确认或 CSV 依据。自动入账不等于用途已确认或银行已对账。",
+                        14f,
+                    )
+                    label(
+                        "${quality.getLong("manual_evidence_count")} 笔有手动确认依据 · ${quality.getLong("csv_evidence_count")} 笔有 CSV 依据（可能重叠）",
+                        14f,
+                    )
+                }
+                card {
+                    label("${quality.getLong("review_count")} 笔待确认", 18f)
+                    label(
+                        "${quality.getLong("review_older_than_7d_count")} 笔距首次创建超过 7 天；这不是连续等待时长。",
+                        14f,
+                    )
+                    if (!quality.isNull("oldest_review_event_created_at"))
+                        label(
+                            "最早首次创建：${displayTime(quality.getString("oldest_review_event_created_at"))}",
+                            12f,
+                        )
+                    val reasons = quality.getJSONArray("review_reasons")
+                    for (i in 0 until reasons.length()) {
+                        val reason = reasons.getJSONObject(i)
+                        label(
+                            "${reviewReason(reason.getString("reason")).ifBlank { "需要核对证据" }} · ${reason.getLong("count")} 笔",
+                            14f,
+                        )
+                    }
+                }
+                label(
+                    "版本 ${quality.getLong("source_version")} · ${displayTime(quality.getString("generated_at"))}。这些统计不能证明通知采集完整或判断解析准确率。",
+                    12f,
+                )
+            }
+        }
+    }
+
+    private fun duplicateCandidatesPage(ev: JSONObject) {
+        screenGeneration++
+        val generation = screenGeneration
+        content.removeAllViews()
+        label("重复候选", 22f)
+        label("同额近时只能提示核实，不能证明重复。合并将保留当前事件的解释；请先比较两边交易详情。", 14f)
+        button("返回") { render() }
+        task {
+            val result = JSONObject(api("duplicate-candidates?event_id=${ev.getString("id")}"))
+            runOnUiThread {
+                if (generation != screenGeneration) return@runOnUiThread
+                if (result.getLong("target_revision") != ev.getLong("revision")) {
+                    label("事件已更新，请返回并刷新后重新查看。", 14f)
+                    return@runOnUiThread
+                }
+                val candidates = result.getJSONArray("candidates")
+                if (result.getBoolean("search_truncated")) label("仅检查最近 500 个同额事件，结果不代表全部历史。", 14f)
+                if (result.getBoolean("ambiguous")) label("存在多个候选，身份仍有歧义，不能自动合并。", 14f)
+                if (candidates.length() == 0) label("未发现符合当前规则的候选；这不证明全部流水没有重复。", 14f)
+                for (i in 0 until candidates.length()) {
+                    val candidate = candidates.getJSONObject(i)
+                    val source = candidate.getJSONObject("event")
+                    val facts = source.getJSONObject("facts")
+                    card {
+                        label(
+                            "${facts.optString("merchant").ifBlank { "未识别商户" }} · ¥ ${money(facts.getString("amount_minor"))}",
+                            18f,
+                        )
+                        label(eventStatus(source), 14f)
+                        val reasons = candidate.getJSONArray("reasons")
+                        for (n in 0 until reasons.length()) label(reasons.getString(n), 12f)
+                        button("查看候选详情") { eventForm(source) }
+                        button("确认重复并合并") {
+                            AlertDialog.Builder(this)
+                                .setTitle("已核实为同一笔交易？")
+                                .setMessage("保留当前事件的金额、用途和实际账户，汇集候选证据；候选已有分录会冲销。仅凭金额相同请勿合并。")
+                                .setNegativeButton("取消", null)
+                                .setPositiveButton("确认重复") { _, _ ->
+                                    task {
+                                        api(
+                                            "merge",
+                                            JSONObject()
+                                                .put("command_id", id())
+                                                .put("source_id", source.getString("id"))
+                                                .put("target_id", ev.getString("id"))
+                                                .put("source_revision", source.getLong("revision"))
+                                                .put("target_revision", ev.getLong("revision")),
+                                        )
+                                        reload()
+                                    }
+                                }
+                                .show()
+                        }
+                    }
+                }
+                label(
+                    "账本版本 ${result.getLong("source_version")} · ${result.getString("algorithm_version")}",
+                    12f,
+                )
+            }
+        }
+    }
+
+    private fun reimbursementPage(ev: JSONObject) {
+        screenGeneration++
+        val generation = screenGeneration
+        content.removeAllViews()
+        label("分配报销回款", 22f)
+        label(
+            "回款 ¥ ${money(ev.getJSONObject("facts").getString("amount_minor"))}。填写本次分配金额；留空表示不分配。保存将替换这笔回款原有分配，既有账务保持不变。",
+            14f,
+        )
+        button("返回") { render() }
+        task {
+            val relations = JSONArray(api("relations?event_id=${ev.getString("id")}"))
+            val balances = JSONArray(api("reimbursement-balances"))
+            val advances = mutableListOf<JSONObject>()
+            var cursor = ""
+            do {
+                val batch =
+                    JSONArray(api("events" + if (cursor.isEmpty()) "" else "?before=$cursor"))
+                for (i in 0 until batch.length()) {
+                    val candidate = batch.getJSONObject(i)
+                    if (
+                        candidate.optBoolean("posted") &&
+                            candidate.getJSONObject("facts").optString("kind") == "ADVANCE" &&
+                            candidate.getString("status") !in listOf("MERGED", "SPLIT")
+                    )
+                        advances.add(candidate)
+                }
+                cursor = if (batch.length() == 500) batch.getJSONObject(499).getString("id") else ""
+            } while (cursor.isNotEmpty())
+            runOnUiThread {
+                if (generation != screenGeneration) return@runOnUiThread
+                val inputs = mutableListOf<Pair<JSONObject, EditText>>()
+                for (advance in advances) {
+                    val f = advance.getJSONObject("facts")
+                    val balance =
+                        (0 until balances.length())
+                            .map { balances.getJSONObject(it) }
+                            .firstOrNull { it.getString("event_id") == advance.getString("id") }
+                    val previous =
+                        (0 until relations.length())
+                            .map { relations.getJSONObject(it) }
+                            .firstOrNull {
+                                it.getString("type") == "REIMBURSES" &&
+                                    it.getString("to_event") == advance.getString("id")
+                            }
+                    card {
+                        label(
+                            "${f.optString("merchant").ifBlank { "垫付" }} · ¥ ${money(f.getString("amount_minor"))}",
+                            18f,
+                        )
+                        label(displayTime(f.getString("occurred_at")), 12f)
+                        if (balance != null)
+                            label(
+                                "已分配 ¥ ${money(balance.getString("allocated_minor"))} · 剩余待关联 ¥ ${money(balance.getString("remaining_minor"))}",
+                                14f,
+                            )
+                        inputs.add(
+                            advance to
+                                field(
+                                    "本次分配（元）",
+                                    if (previous == null) ""
+                                    else money(previous.getString("allocation")),
+                                )
+                        )
+                    }
+                }
+                if (advances.isEmpty()) label("尚无已入账垫付。可先记账为公司垫付，再来分配。", 14f)
+                button("保存分配") {
+                    try {
+                        val allocations = JSONArray()
+                        for ((advance, input) in inputs) {
+                            val value = input.text.toString().trim()
+                            if (value.isNotEmpty())
+                                allocations.put(
+                                    JSONObject()
+                                        .put("advance_id", advance.getString("id"))
+                                        .put("expected_revision", advance.getLong("revision"))
+                                        .put("amount_minor", minor(value))
+                                )
+                        }
+                        val request =
+                            JSONObject()
+                                .put("command_id", id())
+                                .put("reimbursement_id", ev.getString("id"))
+                                .put("expected_revision", ev.getLong("revision"))
+                                .put("allocations", allocations)
+                        task {
+                            api("reimbursement", request)
+                            reload()
+                        }
+                    } catch (e: Exception) {
+                        Toast.makeText(this, "请输入有效金额", Toast.LENGTH_LONG).show()
+                    }
+                }
             }
         }
     }
@@ -1263,7 +1582,14 @@ class MainActivity : Activity() {
                             14f,
                         )
                         val journals = v.getJSONArray("journals")
-                        if (journals.length() == 0) label("未生成正式分录", 14f)
+                        if (journals.length() == 0) {
+                            label(
+                                if (!v.isNull("accounting_revision"))
+                                    "沿用第 ${v.getLong("accounting_revision")} 版账务分录"
+                                else "未生成正式分录",
+                                14f,
+                            )
+                        }
                         for (n in 0 until journals.length()) {
                             val j = journals.getJSONObject(n)
                             label(

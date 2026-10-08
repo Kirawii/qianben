@@ -149,6 +149,39 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		v, e := s.DB.UnlinkTransfer(r.Context(), actor, ledger, req)
 		respond(w, v, e)
+	case "quality":
+		if r.Method != "GET" {
+			w.WriteHeader(405)
+			return
+		}
+		v, e := s.DB.Quality(r.Context(), actor, ledger)
+		respond(w, v, e)
+	case "duplicate-candidates":
+		if r.Method != "GET" {
+			w.WriteHeader(405)
+			return
+		}
+		v, e := s.DB.DuplicateCandidates(r.Context(), actor, ledger, r.URL.Query().Get("event_id"))
+		respond(w, v, e)
+	case "reimbursement-balances":
+		if r.Method != "GET" {
+			w.WriteHeader(405)
+			return
+		}
+		v, e := s.DB.ReimbursementBalances(r.Context(), actor, ledger)
+		respond(w, v, e)
+	case "reimbursement":
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		var req store.ReimbursementRequest
+		if e = decode(w, r, &req); e != nil {
+			respond(w, nil, e)
+			return
+		}
+		v, e := s.DB.AllocateReimbursement(r.Context(), actor, ledger, req)
+		respond(w, v, e)
 	case "evidence":
 		if r.Method != "GET" {
 			w.WriteHeader(405)

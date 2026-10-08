@@ -75,6 +75,7 @@ object NotificationSources {
 }
 
 class Settings(ctx: Context) {
+    internal val context = ctx.applicationContext
     private val p = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
     var url: String
         get() = p.getString("url", "http://127.0.0.1:8080")!!
@@ -107,6 +108,18 @@ class Settings(ctx: Context) {
         get() = p.getBoolean("collect", false)
         set(v) {
             p.edit().putBoolean("collect", v).commit()
+        }
+
+    var offline: Boolean
+        get() = p.getBoolean("offline_cache", false)
+        set(v) {
+            p.edit().putBoolean("offline_cache", v).commit()
+        }
+
+    var cachedAt: String
+        get() = p.getString("cached_at", "")!!
+        set(v) {
+            p.edit().putString("cached_at", v).commit()
         }
 
     var notificationSources: Set<String>
@@ -158,8 +171,26 @@ data class PendingCommand(
 
 class ApiFailure(val status: Int, message: String) : IllegalStateException(message)
 
+@Entity
+data class CachedView(
+    @PrimaryKey val key: String,
+    val ledger: String,
+    val encrypted: String,
+    val capturedAt: String,
+)
+
 @Dao
 interface QueueDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE) fun cache(value: CachedView)
+
+    @Query("SELECT * FROM CachedView WHERE `key`=:key") fun cache(key: String): CachedView?
+
+    @Query("DELETE FROM CachedView WHERE `key` LIKE :scope || ':%'")
+    fun invalidateViews(scope: String)
+
+    @Query("DELETE FROM CachedView WHERE ledger=:ledger OR ledger=''")
+    fun clearViews(ledger: String)
+
     @Insert(onConflict = OnConflictStrategy.IGNORE) fun command(item: PendingCommand)
 
     @Query("SELECT * FROM PendingCommand WHERE id=:id") fun command(id: String): PendingCommand?
@@ -193,12 +224,18 @@ interface QueueDao {
 
     @Query("DELETE FROM Episode WHERE `key`=:key") fun removed(key: String)
 
-    @Query("DELETE FROM Pending WHERE ledger=:ledger") fun clear(ledger: String)
+    @Query("DELETE FROM Pending WHERE ledger=:ledger") fun clearPending(ledger: String)
+
+    @Transaction
+    fun clear(ledger: String) {
+        clearPending(ledger)
+        clearViews(ledger)
+    }
 }
 
 @Database(
-    entities = [Pending::class, Episode::class, PendingCommand::class],
-    version = 2,
+    entities = [Pending::class, Episode::class, PendingCommand::class, CachedView::class],
+    version = 3,
     exportSchema = false,
 )
 abstract class LocalDB : RoomDatabase() {
@@ -225,7 +262,16 @@ abstract class LocalDB : RoomDatabase() {
                                             "CREATE TABLE IF NOT EXISTS PendingCommand (id TEXT NOT NULL PRIMARY KEY,path TEXT NOT NULL,encrypted TEXT NOT NULL,endpoint TEXT NOT NULL,status TEXT NOT NULL)"
                                         )
                                     }
-                                }
+                                },
+                                object : androidx.room.migration.Migration(2, 3) {
+                                    override fun migrate(
+                                        db: androidx.sqlite.db.SupportSQLiteDatabase
+                                    ) {
+                                        db.execSQL(
+                                            "CREATE TABLE IF NOT EXISTS CachedView (`key` TEXT NOT NULL PRIMARY KEY,ledger TEXT NOT NULL,encrypted TEXT NOT NULL,capturedAt TEXT NOT NULL)"
+                                        )
+                                    }
+                                },
                             )
                             .build()
                             .also { instance = it }
@@ -234,6 +280,21 @@ abstract class LocalDB : RoomDatabase() {
 }
 
 object Api {
+    internal fun cached(s: Settings, path: String): String? {
+        val view = LocalDB.get(s.context).queue().cache(viewKey(s, path)) ?: return null
+        s.offline = true
+        s.cachedAt = view.capturedAt
+        return Vault.open(view.encrypted)
+    }
+
+    private fun digest(value: String) =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    internal fun viewKey(s: Settings, path: String) =
+        digest(s.url + "\n" + s.token) + ":" + digest(path)
+
     fun command(ctx: Context, s: Settings, path: String, body: JSONObject): String {
         val q = LocalDB.get(ctx).queue()
         val id = body.getString("command_id")
@@ -265,6 +326,7 @@ object Api {
             "服务地址需要 HTTPS"
         }
         val c = url.openConnection() as HttpURLConnection
+        val cacheKey = viewKey(s, path)
         c.connectTimeout = 10000
         c.readTimeout = 20000
         c.instanceFollowRedirects = false
@@ -281,9 +343,43 @@ object Api {
                 (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use {
                     it.readText()
                 } ?: ""
+            if (code == 401 || code == 403)
+                LocalDB.get(s.context).queue().invalidateViews(cacheKey.substringBefore(':'))
             if (code !in 200..299)
                 throw ApiFailure(code, JSONObject(text).optString("message", "请求失败 $code"))
+            if (body == null) {
+                val ledger =
+                    if (path.startsWith("/v1/ledgers/"))
+                        path.removePrefix("/v1/ledgers/").substringBefore('/')
+                    else ""
+                LocalDB.get(s.context)
+                    .queue()
+                    .cache(
+                        CachedView(
+                            cacheKey,
+                            ledger,
+                            Vault.seal(text),
+                            java.time.Instant.now().toString(),
+                        )
+                    )
+            } else {
+                val ledger =
+                    if (path.startsWith("/v1/ledgers/"))
+                        path.removePrefix("/v1/ledgers/").substringBefore('/')
+                    else ""
+                if (ledger.isNotBlank()) LocalDB.get(s.context).queue().clearViews(ledger)
+            }
             return text
+        } catch (e: java.io.IOException) {
+            if (body == null) {
+                val cached = LocalDB.get(s.context).queue().cache(cacheKey)
+                if (cached != null) {
+                    s.offline = true
+                    s.cachedAt = cached.capturedAt
+                    return Vault.open(cached.encrypted)
+                }
+            }
+            throw e
         } finally {
             c.disconnect()
         }

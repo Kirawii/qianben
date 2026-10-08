@@ -18,6 +18,10 @@
 | GET | `.../relations?event_id=...` | 当前经济与身份关系 |
 | POST | `.../merge` / `.../split` | 原子修复事件身份及账务 |
 | POST | `.../transfer` / `.../unlink-transfer` | 关联 / 解除转账两端 |
+| POST | `.../reimbursement` | 原子替换报销分配，空分配解除 |
+| GET | `.../reimbursement-balances` | 逐笔垫付/回款的已分配及剩余金额 |
+| GET | `.../duplicate-candidates?event_id=...` | 重复候选、理由及搜索范围 |
+| GET | `.../quality` | 同版本处理统计及待确认事件年龄 |
 | GET | `.../reports?from=...&to=...` | 同版本三套视图，左闭右开时间范围 |
 | GET | `.../assets` | 用户确认的固定资产购置与退款后原值 |
 | GET | `.../rules` | 商户分类规则及失效历史 |
@@ -84,3 +88,17 @@ history 返回修订的 facts、evidence_ids、policy_version、source_version�
 通知 ACK 为数组，每项 `delivery_id,status,observation_id?,reason?`。只有 `ACK` 或 `IGNORED` 才删除客户端队列项；`REJECTED` 保留供检查。Observation 与 `EVIDENCE_RECEIVED` Outbox 在同一事务提交，提交后才 ACK。capture time 和 notification posted time 都不会冒充经济发生时间。
 
 报表同时返回 `source_version,algorithm_version`，会计费用、生活消费、现金变动、外部/内部/未分类现金净额、待查余额和未关联转账计数。正式余额以全部 Journal/Entry 的累计为准；报表更正保留旧分录的现实时间。
+
+## PRD 补齐中的接口变化
+
+分类、商户、备注和资产名称单独修改保存新 EventRevision 与确认依据，但沿用原分录。history 的 `accounting_revision` 指向沿用的会计修订；该次 `journals:[]` 不表示原事件未入账。会计性质、金额、实际账户或经济时间修改仍冲销重记。分类报表读取当前接受的分类。
+
+报表算法 `core-v3` 增加 `confirmed_assets_minor,confirmed_liabilities_minor,confirmed_net_worth_minor,provisional_net_worth_minor`。前两项分别排除待查资产、待查负债；后两项之和等于账面净资产。“已确认”表示用途与科目已确认，并非银行已对账。在途款仍包含在账面资产中，单独返回 transfer_clearing_minor。
+
+补期初在同一事务重检并激活该账户因未初始化而阻塞的已接受流水。任何校验失败回滚期初与整批激活；经济时间不晚于启用时间的流水不重复入账。
+
+报销分配请求：`command_id,reimbursement_id,expected_revision,allocations:[{advance_id,expected_revision,amount_minor}]`，最多 50 项。允许部分分配；同一垫付不能重复，累计分配不得超过垫付，整批合计不得超过本笔回款。替换旧分配保留关系历史，失败不影响旧分配。关联不生成分录，回款和垫付的经济字段须先解除分配再修改。
+
+重复候选只提示人工核实，检查最近最多 500 个同额事件，并返回 `search_truncated`。币种、方向、实际资金账户或同来源不同对象冲突排除候选；已拆分事件共享继承证据不会被重新建议合并。未取得经济时间时，可用采集时间生成候选，但不会将其作为入账依据。多个候选标记 ambiguous，合并仍需版本校验和显式确认。真实 PostgreSQL 查询及合并后完整簇约束已验收。
+
+quality 返回已入账、自动入账、带手动/CSV 依据的事件数及待确认原因。手动与 CSV 依据可能重叠；自动入账不等于用途已确认、采集完整或银行已对账。异常年龄基于首次 event_created_at，而非经济时间或连续等待时间。账户另返回 book_as_of（最后分录经济时间）、evidence_received_at（最近相关证据收到时间）、last_balance_check_at（最近余额比较时点）；三者不能互相代替。

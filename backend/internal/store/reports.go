@@ -10,26 +10,30 @@ import (
 )
 
 type Reports struct {
-	Assets            domain.Amount   `json:"assets_minor"`
-	Liabilities       domain.Amount   `json:"liabilities_minor"`
-	NetWorth          domain.Amount   `json:"net_worth_minor"`
-	Income            domain.Amount   `json:"income_minor"`
-	Surplus           domain.Amount   `json:"surplus_minor"`
-	Categories        []CategoryTotal `json:"categories"`
-	Version           int64           `json:"source_version"`
-	Algorithm         string          `json:"algorithm_version"`
-	From              time.Time       `json:"from"`
-	To                time.Time       `json:"to"`
-	Expense           domain.Amount   `json:"expense_minor"`
-	Consumption       domain.Amount   `json:"consumption_minor"`
-	CashChange        domain.Amount   `json:"cash_change_minor"`
-	ExternalCash      domain.Amount   `json:"external_cash_minor"`
-	InternalCash      domain.Amount   `json:"internal_cash_minor"`
-	UnresolvedCash    domain.Amount   `json:"unresolved_cash_minor"`
-	UnresolvedBalance domain.Amount   `json:"unresolved_balance_minor"`
-	ReviewCount       int64           `json:"review_count"`
-	TransferClearing  domain.Amount   `json:"transfer_clearing_minor"`
-	UnlinkedTransfers int64           `json:"unlinked_transfer_count"`
+	ConfirmedAssets      domain.Amount   `json:"confirmed_assets_minor"`
+	ConfirmedLiabilities domain.Amount   `json:"confirmed_liabilities_minor"`
+	ConfirmedNetWorth    domain.Amount   `json:"confirmed_net_worth_minor"`
+	ProvisionalNetWorth  domain.Amount   `json:"provisional_net_worth_minor"`
+	Assets               domain.Amount   `json:"assets_minor"`
+	Liabilities          domain.Amount   `json:"liabilities_minor"`
+	NetWorth             domain.Amount   `json:"net_worth_minor"`
+	Income               domain.Amount   `json:"income_minor"`
+	Surplus              domain.Amount   `json:"surplus_minor"`
+	Categories           []CategoryTotal `json:"categories"`
+	Version              int64           `json:"source_version"`
+	Algorithm            string          `json:"algorithm_version"`
+	From                 time.Time       `json:"from"`
+	To                   time.Time       `json:"to"`
+	Expense              domain.Amount   `json:"expense_minor"`
+	Consumption          domain.Amount   `json:"consumption_minor"`
+	CashChange           domain.Amount   `json:"cash_change_minor"`
+	ExternalCash         domain.Amount   `json:"external_cash_minor"`
+	InternalCash         domain.Amount   `json:"internal_cash_minor"`
+	UnresolvedCash       domain.Amount   `json:"unresolved_cash_minor"`
+	UnresolvedBalance    domain.Amount   `json:"unresolved_balance_minor"`
+	ReviewCount          int64           `json:"review_count"`
+	TransferClearing     domain.Amount   `json:"transfer_clearing_minor"`
+	UnlinkedTransfers    int64           `json:"unlinked_transfer_count"`
 }
 
 type CategoryTotal struct {
@@ -38,7 +42,7 @@ type CategoryTotal struct {
 }
 
 func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Time) (Reports, error) {
-	r := Reports{From: from, To: to, Algorithm: "core-v2", Categories: []CategoryTotal{}}
+	r := Reports{From: from, To: to, Algorithm: "core-v3", Categories: []CategoryTotal{}}
 	if !from.Before(to) {
 		return r, domain.Invalid("报表时间范围无效")
 	}
@@ -52,7 +56,7 @@ func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Ti
 		return r, e
 	}
 	r.Version = l.Version
-	rows, e := tx.Query(ctx, `SELECT a.code,a.cash,(e.debit-e.credit)::text,j.effective_at,COALESCE(v.facts->>'kind','OPENING'),COALESCE(NULLIF(v.facts->>'category',''),'未分类') FROM qb.entries e JOIN qb.accounts a ON a.id=e.account_id JOIN qb.journals j ON j.id=e.journal_id LEFT JOIN qb.journals original ON original.id=j.reversal_of JOIN qb.posting_revisions p ON p.id=COALESCE(original.posting_revision_id,j.posting_revision_id) LEFT JOIN qb.event_revisions v ON v.id=p.event_revision_id WHERE e.ledger_id=$1`, ledger)
+	rows, e := tx.Query(ctx, `SELECT a.code,a.cash,(e.debit-e.credit)::text,j.effective_at,COALESCE(v.facts->>'kind','OPENING'),COALESCE(NULLIF(current_facts.facts->>'category',''),'未分类') FROM qb.entries e JOIN qb.accounts a ON a.id=e.account_id JOIN qb.journals j ON j.id=e.journal_id LEFT JOIN qb.journals original ON original.id=j.reversal_of JOIN qb.posting_revisions p ON p.id=COALESCE(original.posting_revision_id,j.posting_revision_id) LEFT JOIN qb.event_revisions v ON v.id=p.event_revision_id LEFT JOIN qb.events current_event ON current_event.id=v.event_id LEFT JOIN qb.event_revisions current_facts ON current_facts.id=current_event.current_revision_id WHERE e.ledger_id=$1`, ledger)
 	if e != nil {
 		return r, e
 	}
@@ -176,6 +180,22 @@ func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Ti
 	// Debit suspense assets and credit suspense liabilities are both unresolved.
 	// Reversal lines cancel before balances are combined.
 	r.UnresolvedBalance, e = domain.Add(suspenseAsset, -suspenseLiability)
+	if e != nil {
+		return r, e
+	}
+	r.ConfirmedAssets, e = domain.Subtract(r.Assets, suspenseAsset)
+	if e != nil {
+		return r, e
+	}
+	r.ConfirmedLiabilities, e = domain.Add(r.Liabilities, suspenseLiability)
+	if e != nil {
+		return r, e
+	}
+	r.ConfirmedNetWorth, e = domain.Subtract(r.ConfirmedAssets, r.ConfirmedLiabilities)
+	if e != nil {
+		return r, e
+	}
+	r.ProvisionalNetWorth, e = domain.Add(suspenseAsset, suspenseLiability)
 	if e != nil {
 		return r, e
 	}

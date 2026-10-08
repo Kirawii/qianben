@@ -123,8 +123,50 @@ func (d *DB) SetOpening(ctx context.Context, actor, ledger string, r OpeningRequ
 			}
 		}
 		_, e = tx.Exec(ctx, `UPDATE qb.accounts SET initialized=true,revision=revision+1 WHERE ledger_id=$1 AND id=$2`, l.ID, a.ID)
+		if e != nil {
+			return nil, e
+		}
+		// Activate accepted post-cutover facts in the opening transaction. Any
+		// validation or capacity failure rolls back the entire batch and opening.
+		rows, err := tx.Query(ctx, `SELECT ev.id::text FROM qb.events ev JOIN qb.event_revisions v ON v.id=ev.current_revision_id WHERE ev.ledger_id=$1 AND ev.status='REVIEW_REQUIRED' AND ev.review_reason='ACCOUNT_NOT_INITIALIZED' AND v.facts->>'funding_account_id'=$2 ORDER BY (v.facts->>'occurred_at')::timestamptz,ev.created_at,ev.id`, l.ID, a.ID)
+		if err != nil {
+			return nil, err
+		}
+		pending := []string{}
+		for rows.Next() {
+			var id string
+			if err = rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			pending = append(pending, id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range pending {
+			ev, err := eventTx(ctx, tx, l.ID, id)
+			if err != nil {
+				return nil, err
+			}
+			if _, err = writeEvent(ctx, tx, l, id, ev.Revision, ev.Facts, ev.EvidenceIDs, "opening-activation-v1"); err != nil {
+				return nil, err
+			}
+		}
 		a.Initialized = true
 		a.Revision++
+		var balance string
+		e = tx.QueryRow(ctx, `SELECT COALESCE(sum(CASE WHEN $3='LIABILITY' THEN en.credit::numeric-en.debit ELSE en.debit::numeric-en.credit END),0)::text,max(j.effective_at) FROM qb.entries en JOIN qb.journals j ON j.id=en.journal_id WHERE en.ledger_id=$1 AND en.account_id=$2`, l.ID, a.ID, a.Type).Scan(&balance, &a.BookAsOf)
+		if e != nil {
+			return nil, e
+		}
+		n, err := strconv.ParseInt(balance, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		a.Balance = domain.Amount(n)
 		return a, e
 	})
 }
@@ -132,7 +174,7 @@ func (d *DB) Accounts(ctx context.Context, actor, ledger string) ([]domain.Accou
 	if e := d.Authorized(ctx, actor, ledger); e != nil {
 		return nil, e
 	}
-	rows, e := d.Pool.Query(ctx, `SELECT a.id::text,a.code,a.name,a.type,a.cash,a.initialized,a.revision,a.provider,a.masked_ref,COALESCE(sum(CASE WHEN a.type IN ('LIABILITY','INCOME','EQUITY') THEN e.credit-e.debit ELSE e.debit-e.credit END),0)::text FROM qb.accounts a LEFT JOIN qb.entries e ON e.ledger_id=a.ledger_id AND e.account_id=a.id WHERE a.ledger_id=$1 GROUP BY a.id ORDER BY a.code`, ledger)
+	rows, e := d.Pool.Query(ctx, `SELECT a.id::text,a.code,a.name,a.type,a.cash,a.initialized,a.revision,a.provider,a.masked_ref,COALESCE(sum(CASE WHEN a.type IN ('LIABILITY','INCOME','EQUITY') THEN e.credit-e.debit ELSE e.debit-e.credit END),0)::text,max(j.effective_at),(SELECT max(o.created_at) FROM qb.events ev JOIN qb.event_revisions v ON v.id=ev.current_revision_id CROSS JOIN LATERAL jsonb_array_elements_text(v.evidence_ids) ref JOIN qb.observations o ON o.id=ref.value::uuid WHERE ev.ledger_id=a.ledger_id AND ev.status NOT IN ('MERGED','SPLIT') AND (v.facts->>'funding_account_id'=a.id::text OR v.facts->>'repayment_account_id'=a.id::text)),(SELECT max(c.as_of) FROM qb.balance_checks c WHERE c.ledger_id=a.ledger_id AND c.account_id=a.id) FROM qb.accounts a LEFT JOIN qb.entries e ON e.ledger_id=a.ledger_id AND e.account_id=a.id LEFT JOIN qb.journals j ON j.id=e.journal_id WHERE a.ledger_id=$1 GROUP BY a.id ORDER BY a.code`, ledger)
 	if e != nil {
 		return nil, e
 	}
@@ -141,7 +183,7 @@ func (d *DB) Accounts(ctx context.Context, actor, ledger string) ([]domain.Accou
 	for rows.Next() {
 		var a domain.Account
 		var balance string
-		if e = rows.Scan(&a.ID, &a.Code, &a.Name, &a.Type, &a.Cash, &a.Initialized, &a.Revision, &a.Provider, &a.MaskedRef, &balance); e != nil {
+		if e = rows.Scan(&a.ID, &a.Code, &a.Name, &a.Type, &a.Cash, &a.Initialized, &a.Revision, &a.Provider, &a.MaskedRef, &balance, &a.BookAsOf, &a.EvidenceReceivedAt, &a.LastBalanceCheckAt); e != nil {
 			return nil, e
 		}
 		n, err := strconv.ParseInt(balance, 10, 64)

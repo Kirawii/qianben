@@ -88,6 +88,9 @@ func TestPostgresLifecycle(t *testing.T) {
 	if r.Assets != 100000 || r.NetWorth != 100000 || r.Liabilities != 0 {
 		t.Fatalf("suspense balance sheet: %+v", r)
 	}
+	if r.ConfirmedAssets != 97000 || r.ConfirmedNetWorth != 97000 || r.ProvisionalNetWorth != 3000 {
+		t.Fatalf("suspense must not inflate confirmed assets: %+v", r)
+	}
 	req.ExpectedRevision = 1
 	req.Facts.Kind = "EXPENSE"
 	var wg sync.WaitGroup
@@ -228,8 +231,17 @@ func TestPostgresLifecycle(t *testing.T) {
 		Revision int64             `json:"revision"`
 		Journals []json.RawMessage `json:"journals"`
 	}
-	if e = json.Unmarshal(history[0], &latest); e != nil || latest.Revision != 3 || len(latest.Journals) != 2 {
-		t.Fatal("history posting repair", latest, e)
+	if e = json.Unmarshal(history[0], &latest); e != nil || latest.Revision != 3 || len(latest.Journals) != 0 {
+		t.Fatal("descriptive revision must not repost", latest, e)
+	}
+	var dining domain.Amount
+	for _, category := range r.Categories {
+		if category.Category == "餐饮" {
+			dining = category.Amount
+		}
+	}
+	if dining != 3000 {
+		t.Fatal("classification-only revision did not update report", r.Categories)
 	}
 	var oldest struct {
 		Journals []struct {
@@ -251,7 +263,174 @@ func TestPostgresLifecycle(t *testing.T) {
 	var count int
 	var sum string
 	e = admin.Pool.QueryRow(ctx, `SELECT count(*),COALESCE(sum(debit-credit),0)::text FROM qb.entries WHERE ledger_id=$1`, ledger.ID).Scan(&count, &sum)
-	if e != nil || count != 16 || sum != "0" {
+	if e != nil || count != 12 || sum != "0" {
 		t.Fatal("journal invariants", count, sum, e)
+	}
+	// Allocating partial and batched reimbursements links existing journals only.
+	create := func(kind string, amount domain.Amount, at time.Time) domain.Event {
+		t.Helper()
+		b, err := db.SaveEvent(ctx, actor, ledger.ID, EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: domain.Facts{Kind: kind, Amount: amount, Currency: "CNY", OccurredAt: &at, FundingAccount: account.ID}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ev domain.Event
+		if err = json.Unmarshal(b, &ev); err != nil {
+			t.Fatal(err)
+		}
+		return ev
+	}
+	a1 := create("ADVANCE", 2000, incomeAt.Add(time.Hour))
+	a2 := create("ADVANCE", 3000, incomeAt.Add(2*time.Hour))
+	b1 := create("REIMBURSEMENT", 4000, incomeAt.Add(3*time.Hour))
+	b2 := create("REIMBURSEMENT", 1000, incomeAt.Add(4*time.Hour))
+	allocation := ReimbursementRequest{CommandID: domain.ID(), ReimbursementID: b1.ID, ExpectedRevision: 1, Allocations: []ReimbursementAllocation{{a1.ID, 1, 1000}, {a2.ID, 1, 3000}}}
+	accepted, err := db.AllocateReimbursement(ctx, actor, ledger.ID, allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := db.AllocateReimbursement(ctx, actor, ledger.ID, allocation)
+	var acceptedResult, retriedResult any
+	json.Unmarshal(accepted, &acceptedResult)
+	json.Unmarshal(retried, &retriedResult)
+	if err != nil || string(domain.Hashable(acceptedResult)) != string(domain.Hashable(retriedResult)) {
+		t.Fatal("allocation retry", err)
+	}
+	second := ReimbursementRequest{CommandID: domain.ID(), ReimbursementID: b2.ID, ExpectedRevision: 1, Allocations: []ReimbursementAllocation{{a1.ID, 1, 1000}}}
+	if _, err = db.AllocateReimbursement(ctx, actor, ledger.ID, second); err != nil {
+		t.Fatal(err)
+	}
+	balances, err := db.ReimbursementBalances(ctx, actor, ledger.ID)
+	if err != nil || len(balances) != 4 {
+		t.Fatal("reimbursement balances", balances, err)
+	}
+	for _, raw := range balances {
+		var balance struct {
+			Remaining domain.Amount `json:"remaining_minor"`
+			Allocated domain.Amount `json:"allocated_minor"`
+			Amount    domain.Amount `json:"amount_minor"`
+		}
+		if err = json.Unmarshal(raw, &balance); err != nil || balance.Remaining != 0 || balance.Allocated != balance.Amount {
+			t.Fatal("incorrect outstanding amount", balance, err)
+		}
+	}
+	allocation.CommandID = domain.ID()
+	allocation.Allocations[0].Amount = 2000
+	if _, err = db.AllocateReimbursement(ctx, actor, ledger.ID, allocation); err == nil {
+		t.Fatal("over-allocation accepted")
+	}
+	links, err := db.Relations(ctx, actor, ledger.ID, b1.ID)
+	if err != nil || len(links) != 2 {
+		t.Fatal("failed replacement changed prior allocations", links, err)
+	}
+	edit := EventRequest{CommandID: domain.ID(), EventID: b1.ID, ExpectedRevision: 1, Facts: b1.Facts}
+	edit.Facts.Amount = 5000
+	if _, err = db.SaveEvent(ctx, actor, ledger.ID, edit); err == nil {
+		t.Fatal("linked reimbursement economic edit accepted")
+	}
+	allocation.CommandID = domain.ID()
+	allocation.Allocations = nil
+	if _, err = db.AllocateReimbursement(ctx, actor, ledger.ID, allocation); err != nil {
+		t.Fatal(err)
+	}
+	links, err = db.Relations(ctx, actor, ledger.ID, b1.ID)
+	if err != nil || len(links) != 0 {
+		t.Fatal("allocation unlink", links, err)
+	}
+	e = admin.Pool.QueryRow(ctx, `SELECT count(*) FROM qb.entries WHERE ledger_id=$1`, ledger.ID).Scan(&count)
+	if e != nil || count != 20 {
+		t.Fatal("allocation posted duplicate journals", count, e)
+	}
+	r, e = db.Reports(ctx, actor, ledger.ID, cutover, incomeAt.Add(5*time.Hour))
+	if e != nil || r.Income != 5000 || r.Consumption != 2000 || r.NetWorth != 103000 {
+		t.Fatal("reimbursement treated as income or consumption", r, e)
+	}
+	lateRaw, e := db.CreateAccount(ctx, actor, ledger.ID, AccountRequest{CommandID: domain.ID(), Name: "晚补期初", Type: "ASSET", Cash: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	var late domain.Account
+	json.Unmarshal(lateRaw, &late)
+	newPending := func(kind string, at time.Time) EventRequest {
+		t.Helper()
+		request := EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: domain.Facts{Kind: kind, Amount: 1000, Currency: "CNY", OccurredAt: &at, FundingAccount: late.ID}}
+		if _, err := db.SaveEvent(ctx, actor, ledger.ID, request); err != nil {
+			t.Fatal(err)
+		}
+		return request
+	}
+	good := newPending("EXPENSE", incomeAt.Add(6*time.Hour))
+	bad := newPending("UNSUPPORTED", incomeAt.Add(7*time.Hour))
+	historical := newPending("EXPENSE", cutover)
+	opening := OpeningRequest{CommandID: domain.ID(), AccountID: late.ID, Amount: 5000, AsOf: cutover, Meaning: "BALANCE"}
+	if _, err := db.SetOpening(ctx, actor, ledger.ID, opening); err == nil {
+		t.Fatal("invalid activation batch accepted")
+	}
+	all, err := db.Accounts(ctx, actor, ledger.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range all {
+		if a.ID == late.ID && (a.Initialized || a.Balance != 0) {
+			t.Fatal("failed activation committed opening", a)
+		}
+	}
+	bad.CommandID = domain.ID()
+	bad.ExpectedRevision = 1
+	bad.Facts.Kind = "EXPENSE"
+	if _, err = db.SaveEvent(ctx, actor, ledger.ID, bad); err != nil {
+		t.Fatal(err)
+	}
+	opening.CommandID = domain.ID()
+	openingResult, err := db.SetOpening(ctx, actor, ledger.ID, opening)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var openingAccount domain.Account
+	if err = json.Unmarshal(openingResult, &openingAccount); err != nil || openingAccount.Balance != 3000 {
+		t.Fatal("opening response did not include activated balance", openingAccount, err)
+	}
+	events, err := db.Events(ctx, actor, ledger.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if (ev.ID == good.EventID || ev.ID == bad.EventID) && !ev.Posted {
+			t.Fatal("post-cutover event not activated", ev)
+		}
+		if ev.ID == historical.EventID && (ev.Posted || ev.Status != "HISTORICAL_ONLY") {
+			t.Fatal("opening double counted historical event", ev)
+		}
+	}
+	all, err = db.Accounts(ctx, actor, ledger.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range all {
+		if a.ID == late.ID && (!a.Initialized || a.Balance != 3000) {
+			t.Fatal("activated balance", a)
+		}
+		if a.ID == late.ID && (a.BookAsOf == nil || !a.BookAsOf.Equal(incomeAt.Add(7*time.Hour)) || a.EvidenceReceivedAt == nil || a.LastBalanceCheckAt != nil) {
+			t.Fatal("account evidence freshness", a)
+		}
+		if a.ID == account.ID && (a.LastBalanceCheckAt == nil || !a.LastBalanceCheckAt.Equal(cutover)) {
+			t.Fatal("balance-check freshness", a)
+		}
+	}
+	qualityRaw, err := db.Quality(ctx, actor, ledger.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var quality struct {
+		Posted    int64  `json:"posted_count"`
+		Automatic int64  `json:"automatic_posted_count"`
+		Manual    int64  `json:"manual_evidence_count"`
+		Review    int64  `json:"review_count"`
+		AgeBasis  string `json:"age_basis"`
+	}
+	if err = json.Unmarshal(qualityRaw, &quality); err != nil || quality.Posted != 9 || quality.Automatic != 0 || quality.Manual != 10 || quality.Review != 0 || quality.AgeBasis != "event_created_at" {
+		t.Fatal("quality counts", quality, err)
+	}
+	if _, err = db.Quality(ctx, domain.ID(), ledger.ID); err == nil {
+		t.Fatal("cross-user quality read")
 	}
 }
