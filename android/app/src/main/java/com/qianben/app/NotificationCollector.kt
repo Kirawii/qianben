@@ -101,9 +101,21 @@ class NotificationCollector : NotificationListenerService() {
                             .put("snapshot_key", "$episode:$seq")
                             .put("capture_sequence", seq)
                             .put("package", sbn.packageName)
-                            .put("title", title)
-                            .put("text", text)
-                            .put("big_text", big)
+                            .put(
+                                "title",
+                                if (
+                                    sbn.packageName in
+                                        setOf("com.tencent.mm", "com.eg.android.AlipayGphone")
+                                )
+                                    title
+                                else NotificationSources.names[sbn.packageName].orEmpty(),
+                            )
+                            .put("text", "")
+                            .put("big_text", "")
+                            .put(
+                                "structured",
+                                LocalNotificationParser.summarize(title, text, big, hash),
+                            )
                             .put("group_summary", false)
                             .put("capture_reason", reason)
                             .put("observed_at", Instant.now().toString())

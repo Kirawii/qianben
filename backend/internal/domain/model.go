@@ -119,21 +119,31 @@ type Plan struct {
 	EffectiveAt time.Time `json:"effective_at"`
 }
 type Delivery struct {
-	DeliveryID           string    `json:"delivery_id"`
-	DeviceID             string    `json:"device_id"`
-	SourceIdentity       string    `json:"source_identity"`
-	SourceObjectKey      string    `json:"source_object_key"`
-	SnapshotKey          string    `json:"snapshot_key"`
-	CaptureSequence      int64     `json:"capture_sequence"`
-	Package              string    `json:"package"`
-	Title                string    `json:"title"`
-	Text                 string    `json:"text"`
-	BigText              string    `json:"big_text"`
-	GroupSummary         bool      `json:"group_summary"`
-	CaptureReason        string    `json:"capture_reason"`
-	ObservedAt           time.Time `json:"observed_at"`
-	NotificationPostedAt time.Time `json:"notification_posted_at"`
-	Availability         string    `json:"content_availability"`
+	Structured           *NotificationSummary `json:"structured,omitempty"`
+	DeliveryID           string               `json:"delivery_id"`
+	DeviceID             string               `json:"device_id"`
+	SourceIdentity       string               `json:"source_identity"`
+	SourceObjectKey      string               `json:"source_object_key"`
+	SnapshotKey          string               `json:"snapshot_key"`
+	CaptureSequence      int64                `json:"capture_sequence"`
+	Package              string               `json:"package"`
+	Title                string               `json:"title"`
+	Text                 string               `json:"text"`
+	BigText              string               `json:"big_text"`
+	GroupSummary         bool                 `json:"group_summary"`
+	CaptureReason        string               `json:"capture_reason"`
+	ObservedAt           time.Time            `json:"observed_at"`
+	NotificationPostedAt time.Time            `json:"notification_posted_at"`
+	Availability         string               `json:"content_availability"`
+}
+
+// NotificationSummary contains locally extracted hints, never account or transaction-time proof.
+type NotificationSummary struct {
+	Version  string `json:"version"`
+	Amount   Amount `json:"amount_minor"`
+	Currency string `json:"currency"`
+	Kind     string `json:"kind"`
+	RawHash  string `json:"raw_hash"`
 }
 type Ack struct {
 	DeliveryID    string `json:"delivery_id"`

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/Kirawii/qianben/backend/internal/domain"
 	"os"
 	"testing"
@@ -326,5 +327,92 @@ func TestEvidenceAndRepair(t *testing.T) {
 	}
 	if e = json.Unmarshal(qualityRaw, &quality); e != nil || quality.Review != 2 || quality.Old != 1 || quality.CSV != 1 || len(quality.Reasons) == 0 {
 		t.Fatal("quality aging and import evidence", quality, e)
+	}
+	// Minimal uploads are immutable structured observations, not fabricated raw text.
+	item := delivery
+	item.DeliveryID, item.SourceObjectKey, item.SnapshotKey = domain.ID(), domain.ID(), "local:1"
+	item.Title, item.Text, item.BigText = "工商银行", "", ""
+	item.Structured = &domain.NotificationSummary{Version: "local-notification-v1", Amount: 12345, Currency: "CNY", Kind: "CASH_OUT", RawHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	for i := 0; i < 2; i++ {
+		acks, err := db.Ingest(ctx, actor, l.ID, []domain.Delivery{item})
+		if err != nil || len(acks) != 1 || acks[0].Status != "ACK" {
+			t.Fatal("structured ingest retry", acks, err)
+		}
+	}
+	drain()
+	events, e = db.Events(ctx, actor, l.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Facts.Amount == 12345 {
+			found = true
+			if ev.Posted || ev.Facts.OccurredAt != nil || ev.Facts.FundingAccount != "" || ev.Facts.Merchant != "" {
+				t.Fatal("structured hint acquired unsupported proof", ev)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("structured observation not interpreted")
+	}
+	changed = item
+	copySummary := *item.Structured
+	changed.Structured = &copySummary
+	changed.Structured.Amount = 54321
+	acks, err := db.Ingest(ctx, actor, l.ID, []domain.Delivery{changed})
+	if err != nil || len(acks) != 1 || acks[0].Status != "REJECTED" {
+		t.Fatal("mutated structured delivery accepted", acks, err)
+	}
+	var historyEvent domain.Event
+	for _, ev := range events {
+		if ev.Posted && ev.Facts.Kind == "EXPENSE" {
+			historyEvent = ev
+			break
+		}
+	}
+	if historyEvent.ID == "" {
+		t.Fatal("no posted history fixture")
+	}
+	for i := 0; i < 104; i++ {
+		facts := historyEvent.Facts
+		facts.Note = fmt.Sprintf("history pagination %d", i)
+		raw, err := db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: historyEvent.ID, ExpectedRevision: historyEvent.Revision, Facts: facts})
+		if err != nil {
+			t.Fatal("history revision", i, err)
+		}
+		if err = json.Unmarshal(raw, &historyEvent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := db.History(ctx, actor, l.ID, historyEvent.ID)
+	if err != nil || len(page) != 100 {
+		t.Fatal("history first page", len(page), err)
+	}
+	var last struct {
+		Revision int64 `json:"revision"`
+	}
+	if err = json.Unmarshal(page[99], &last); err != nil {
+		t.Fatal(err)
+	}
+	older, err := db.HistoryBefore(ctx, actor, l.ID, historyEvent.ID, last.Revision)
+	if err != nil || len(older) != int(last.Revision-1) {
+		t.Fatal("history older page", len(older), last, err)
+	}
+	if len(older) == 0 {
+		t.Fatal("older revisions lost")
+	}
+	var oldest struct {
+		Revision int64 `json:"revision"`
+	}
+	json.Unmarshal(older[len(older)-1], &oldest)
+	if oldest.Revision != 1 {
+		t.Fatal("history does not reach original", oldest)
+	}
+	if _, err = db.HistoryBefore(ctx, domain.ID(), l.ID, historyEvent.ID, last.Revision); err == nil {
+		t.Fatal("cross-user history")
+	}
+	if _, err = db.HistoryBefore(ctx, actor, l.ID, historyEvent.ID, -1); err == nil {
+		t.Fatal("negative history cursor")
 	}
 }

@@ -8,6 +8,14 @@ import (
 
 // History preserves the facts and posting effects of each accepted revision.
 func (d *DB) History(ctx context.Context, actor, ledger, event string) ([]json.RawMessage, error) {
+	return d.HistoryBefore(ctx, actor, ledger, event, 0)
+}
+
+// HistoryBefore uses an exclusive revision cursor; later edits cannot shift older pages.
+func (d *DB) HistoryBefore(ctx context.Context, actor, ledger, event string, before int64) ([]json.RawMessage, error) {
+	if before < 0 {
+		return nil, domain.Invalid("历史游标无效")
+	}
 	if !domain.IsUUID(event) {
 		return nil, domain.Invalid("事件 ID 无效")
 	}
@@ -27,7 +35,7 @@ func (d *DB) History(ctx context.Context, actor, ledger, event string) ([]json.R
  'journals',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',j.id,'kind',j.kind,'effective_at',j.effective_at,'reversal_of',j.reversal_of,'reversed_by',(SELECT rev.id FROM qb.journals rev WHERE rev.reversal_of=j.id),
  'entries',COALESCE((SELECT jsonb_agg(jsonb_build_object('account',a.name,'debit_minor',en.debit::text,'credit_minor',en.credit::text) ORDER BY a.code,en.id) FROM qb.entries en JOIN qb.accounts a ON a.id=en.account_id WHERE en.journal_id=j.id),'[]'::jsonb)) ORDER BY CASE WHEN j.kind='REVERSAL' THEN 0 ELSE 1 END,j.created_at,j.id)
  FROM qb.posting_revisions p JOIN qb.journals j ON j.posting_revision_id=p.id WHERE p.event_revision_id=v.id),'[]'::jsonb))
- FROM qb.event_revisions v WHERE v.ledger_id=$1 AND v.event_id=$2 ORDER BY v.number DESC LIMIT 100`, ledger, event)
+ FROM qb.event_revisions v WHERE v.ledger_id=$1 AND v.event_id=$2 AND ($3::bigint=0 OR v.number<$3) ORDER BY v.number DESC LIMIT 100`, ledger, event, before)
 	if e != nil {
 		return nil, e
 	}

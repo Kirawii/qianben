@@ -7,6 +7,7 @@ import (
 	"github.com/Kirawii/qianben/backend/internal/store"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -93,7 +94,16 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(405)
 			return
 		}
-		v, e := s.DB.History(r.Context(), actor, ledger, r.URL.Query().Get("event_id"))
+		before := int64(0)
+		if raw := r.URL.Query().Get("before_revision"); raw != "" {
+			var err error
+			before, err = strconv.ParseInt(raw, 10, 64)
+			if err != nil || before < 1 {
+				respond(w, nil, domain.Invalid("历史游标无效"))
+				return
+			}
+		}
+		v, e := s.DB.HistoryBefore(r.Context(), actor, ledger, r.URL.Query().Get("event_id"), before)
 		respond(w, v, e)
 	case "balance-checks":
 		switch r.Method {

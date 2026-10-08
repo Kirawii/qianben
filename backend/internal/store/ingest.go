@@ -33,6 +33,9 @@ func (d *DB) Ingest(ctx context.Context, actor, ledger string, batch []domain.De
 }
 func (d *DB) ingestOne(ctx context.Context, actor, ledger string, item domain.Delivery) (domain.Ack, error) {
 	ack := domain.Ack{DeliveryID: item.DeliveryID}
+	if item.Structured != nil && !evidence.ValidSummary(item) {
+		return ack, domain.Invalid("本地结构化通知无效")
+	}
 	if !domain.IsUUID(ledger) || !textLimit(item.DeviceID, 128) || !textLimit(item.DeliveryID, 128) || !textLimit(item.SourceObjectKey, 512) || !textLimit(item.SnapshotKey, 128) || item.CaptureSequence < 1 || item.ObservedAt.IsZero() || len(item.Title)+len(item.Text)+len(item.BigText) > 24000 || !AllowedPackages[item.Package] || item.SourceIdentity != "android.notification:"+item.Package {
 		return ack, domain.Invalid("通知来源或字段无效")
 	}
@@ -42,7 +45,11 @@ func (d *DB) ingestOne(ctx context.Context, actor, ledger string, item domain.De
 	}
 	payload := domain.Hashable(item)
 	hash := Hash(payload)
-	snapshotHash := Hash(domain.Hashable(map[string]any{"package": item.Package, "title": item.Title, "text": item.Text, "big_text": item.BigText, "posted_at": item.NotificationPostedAt, "availability": item.Availability, "summary": item.GroupSummary}))
+	snapshot := map[string]any{"package": item.Package, "title": item.Title, "text": item.Text, "big_text": item.BigText, "posted_at": item.NotificationPostedAt, "availability": item.Availability, "summary": item.GroupSummary}
+	if item.Structured != nil {
+		snapshot["structured"] = item.Structured
+	}
+	snapshotHash := Hash(domain.Hashable(snapshot))
 	tx, e := d.Pool.Begin(ctx)
 	if e != nil {
 		return ack, e
@@ -203,7 +210,11 @@ func (d *DB) Work(ctx context.Context) (bool, error) {
 		if e != nil && !existing {
 			return false, e
 		}
-		ev, err := writeEvent(ctx, tx, l, id, revision, f, ids, fmt.Sprintf("core-v1;parser=%s;mapping=%d", evidence.ParserVersion, ruleVersion))
+		parserVersion := evidence.ParserVersion
+		if delivery.Structured != nil {
+			parserVersion = delivery.Structured.Version
+		}
+		ev, err := writeEvent(ctx, tx, l, id, revision, f, ids, fmt.Sprintf("core-v1;parser=%s;mapping=%d", parserVersion, ruleVersion))
 		if err != nil {
 			return false, err
 		}

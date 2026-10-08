@@ -285,7 +285,8 @@ class MainActivity : Activity() {
     private fun updateCacheBanner() {
         if (!::cacheBanner.isInitialized) return
         cacheBanner.visibility =
-            if (settings.offline || loadedFromCache) android.view.View.VISIBLE else android.view.View.GONE
+            if (settings.offline || loadedFromCache) android.view.View.VISIBLE
+            else android.view.View.GONE
         cacheBanner.text = "本机缓存 · 保存于 ${displayTime(settings.cachedAt)}，尚未联网核验。各页面可能不同步，点击刷新账本。"
     }
 
@@ -449,7 +450,7 @@ class MainActivity : Activity() {
                 }
                 .show()
         }
-        label("开启后，所选来源的必要财务通知片段会加密保存在本机并上传当前服务解析。关闭来源仅停止新采集，已排队证据仍会上传。", 13f)
+        label("新通知在本机提取金额、币种和收支方向，只上传结构化提示及原文摘要哈希，不上传通知全文。旧版已排队通知仍按原格式上传；关闭来源仅停止新采集。", 13f)
         label(
             "通知监听：${if(NotificationCollector.connected) "已连接" else "未连接"}\n最近采集：${settings.lastCapture.ifBlank{"尚无记录"}}",
             13f,
@@ -1557,15 +1558,17 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun historyPage(ev: JSONObject) {
+    private fun historyPage(ev: JSONObject, before: Long = 0) {
         screenGeneration++
         val generation = screenGeneration
         content.removeAllViews()
         label("修订历史", 22f)
-        label("保留每次接受的事实与账务；最近 100 次修订。", 14f)
+        label("保留每次接受的事实与账务，每页 100 次，可继续查看更早修订。", 14f)
+        if (before > 0) button("查看最新修订") { historyPage(ev) }
         button("返回事件列表") { render() }
         task {
-            val versions = JSONArray(api("history?event_id=${ev.getString("id")}"))
+            val cursor = if (before > 0) "&before_revision=$before" else ""
+            val versions = JSONArray(api("history?event_id=${ev.getString("id")}$cursor"))
             runOnUiThread {
                 if (generation != screenGeneration || page != "待确认") return@runOnUiThread
                 for (i in 0 until versions.length()) {
@@ -1613,6 +1616,14 @@ class MainActivity : Activity() {
                         )
                     }
                 }
+                if (versions.length() == 100)
+                    button("查看更早修订") {
+                        historyPage(
+                            ev,
+                            versions.getJSONObject(versions.length() - 1).getLong("revision"),
+                        )
+                    }
+                else label("已到最早修订", 13f)
             }
         }
     }

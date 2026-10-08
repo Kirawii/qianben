@@ -15,6 +15,9 @@ var foreignRE = regexp.MustCompile(`(?i)USD|EUR|JPY|HKD|GBP|美元|欧元|日元
 const ParserVersion = "notification-v1"
 
 func Candidate(d domain.Delivery) bool {
+	if d.Structured != nil {
+		return ValidSummary(d)
+	}
 	if d.Package == "com.tencent.mm" && d.Title != "微信支付" && d.Title != "微信收款助手" && d.Title != "微信支付凭证" {
 		return false
 	}
@@ -25,6 +28,14 @@ func Candidate(d domain.Delivery) bool {
 }
 func Parse(d domain.Delivery) (domain.Facts, string) {
 	f := domain.Facts{Kind: "UNKNOWN", Currency: "CNY", Merchant: d.Title, Category: "待分类", TimePrecision: "UNKNOWN"}
+	if d.Structured != nil {
+		if !ValidSummary(d) {
+			return f, "INVALID_STRUCTURED_NOTIFICATION"
+		}
+		f.Amount, f.Currency, f.Kind = d.Structured.Amount, d.Structured.Currency, d.Structured.Kind
+		f.Merchant = ""
+		return f, "LOCAL_STRUCTURED_HINT"
+	}
 	text := d.Title + " " + d.Text
 	if d.BigText != "" {
 		text = d.Title + " " + d.BigText
@@ -80,4 +91,35 @@ func Parse(d domain.Delivery) (domain.Facts, string) {
 		tail = m[1]
 	}
 	return f, tail
+}
+
+func ValidSummary(d domain.Delivery) bool {
+	s := d.Structured
+	if s == nil || s.Version != "local-notification-v1" || d.GroupSummary || d.Availability == "REDACTED" || d.Text != "" || d.BigText != "" || s.Amount < 0 || s.Amount > 99999999999999 {
+		return false
+	}
+	if s.Currency != "CNY" && s.Currency != "UNKNOWN" {
+		return false
+	}
+	if s.Kind != "UNKNOWN" && s.Kind != "CASH_IN" && s.Kind != "CASH_OUT" {
+		return false
+	}
+	if s.Amount == 0 && s.Kind != "UNKNOWN" {
+		return false
+	}
+	if len(s.RawHash) != 64 {
+		return false
+	}
+	for _, c := range s.RawHash {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	if d.Package == "com.tencent.mm" && d.Title != "微信支付" && d.Title != "微信收款助手" && d.Title != "微信支付凭证" {
+		return false
+	}
+	if d.Package == "com.eg.android.AlipayGphone" && d.Title != "支付宝" && d.Title != "支付助手" && d.Title != "收款到账" && d.Title != "收钱到账" {
+		return false
+	}
+	return true
 }

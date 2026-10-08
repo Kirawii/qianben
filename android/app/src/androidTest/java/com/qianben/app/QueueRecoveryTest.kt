@@ -11,6 +11,28 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class QueueRecoveryTest {
     @Test
+    fun localNotificationSummaryDoesNotLeakOrInventEvidence() {
+        val hash = "a".repeat(64)
+        val result = LocalNotificationParser.summarize("微信支付", "支付成功 支付30.50元 商户秘密名称", "", hash)
+        assertEquals("3050", result.getString("amount_minor"))
+        assertEquals("CASH_OUT", result.getString("kind"))
+        assertFalse(result.toString().contains("秘密"))
+        assertFalse(result.has("occurred_at"))
+        assertFalse(result.has("funding_account_id"))
+        val ambiguous = LocalNotificationParser.summarize("银行", "账户支出人民币30元 余额人民币100元", "", hash)
+        assertEquals("0", ambiguous.getString("amount_minor"))
+        assertEquals("UNKNOWN", ambiguous.getString("kind"))
+        val foreign = LocalNotificationParser.summarize("银行", "支付成功 支付10美元", "", hash)
+        assertEquals("UNKNOWN", foreign.getString("currency"))
+        val absent = LocalNotificationParser.summarize("银行", "支付成功 支付10", "", hash)
+        assertEquals("UNKNOWN", absent.getString("currency"))
+        val invalid = LocalNotificationParser.summarize("银行", "支付成功 支付1.234元", "", hash)
+        assertEquals("0", invalid.getString("amount_minor"))
+        val big = LocalNotificationParser.summarize("银行", "账户支出人民币10元", "账户支出人民币20元", hash)
+        assertEquals("2000", big.getString("amount_minor"))
+    }
+
+    @Test
     fun sourceSelectionPersistsAndRejectsUnknownPackages() {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val settings = Settings(ctx)

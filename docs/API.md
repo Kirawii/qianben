@@ -4,6 +4,10 @@
 
 ## 路由
 
+Android 0.1.4 新采集使用 `structured` 通知格式：`version=local-notification-v1`、字符串分金额 `amount_minor`、`currency=CNY|UNKNOWN`、`kind=UNKNOWN|CASH_IN|CASH_OUT`、64 位小写 SHA-256 `raw_hash`。`text`/`big_text` 必须为空；标题为支付固定服务名或银行来源标签。结构化内容是本地抽取提示，不证明实际账户、经济发生时间、用途或对账状态。客户端保留来源对象、快照号及采集/通知时间；服务端保存结构化不可变证据和解析器版本。未知版本或混入正文拒绝。旧版已排队通知仍兼容原格式，应先升级服务端再升级手机。
+
+当前新采集不持久化通知全文，因此不能对原文重新解析；摘要哈希只能标识原快照，不能还原或独立证明原文。结构化事实与账务历史可查看回放。原始抽取片段、本地原文保留期限和用户授权诊断上传仍须补齐。
+
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/health` | 进程存活检查 |
@@ -14,7 +18,7 @@
 | POST | `.../observations` | 分项持久化 ACK 的通知批次 |
 | POST | `.../csv` | 有明确账户的 CSV 原子导入 |
 | GET | `.../evidence?event_id=...` | 原始版本化证据 |
-| GET | `.../history?event_id=...` | 最近 100 次接受的修订及分录，按修订号倒序 |
+| GET | `.../history?event_id=...&before_revision=...` | 每页 100 次修订及分录，游标为上一页最后修订号，排除该号；首请求省略游标 |
 | GET | `.../relations?event_id=...` | 当前经济与身份关系 |
 | POST | `.../merge` / `.../split` | 原子修复事件身份及账务 |
 | POST | `.../transfer` / `.../unlink-transfer` | 关联 / 解除转账两端 |
