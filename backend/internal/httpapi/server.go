@@ -89,6 +89,13 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	ledger := parts[2]
 	switch parts[3] {
+	case "transfer-candidates":
+		if r.Method != "GET" {
+			w.WriteHeader(405)
+			return
+		}
+		v, e := s.DB.TransferCandidates(r.Context(), actor, ledger, r.URL.Query().Get("event_id"))
+		respond(w, v, e)
 	case "funding":
 		switch r.Method {
 		case "GET":

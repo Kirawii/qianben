@@ -170,7 +170,7 @@ func TestEvidenceAndRepair(t *testing.T) {
 		t.Fatal(e)
 	}
 	r, e = db.Reports(ctx, actor, l.ID, cut, observed.Add(time.Hour))
-	if e != nil || r.Consumption != 1500 || r.CashChange != -1500 || r.InternalCash != -500 {
+	if e != nil || r.Consumption != 1500 || r.CashChange != -1500 || r.InternalCash != 0 || r.ExternalCash != -1500 {
 		t.Fatal("credit repayment must not count consumption twice", r, e)
 	}
 	if r.Assets != 8500 || r.Liabilities != 0 || r.NetWorth != 8500 {
@@ -200,6 +200,7 @@ func TestEvidenceAndRepair(t *testing.T) {
 	out, in := f, f
 	out.Kind = "TRANSFER_OUT"
 	in.Kind = "TRANSFER_IN"
+	out.TimePrecision, in.TimePrecision = "EXACT", "EXACT"
 	in.FundingAccount = wallet.ID
 	later := observed.Add(24 * time.Hour)
 	in.OccurredAt = &later
@@ -211,8 +212,15 @@ func TestEvidenceAndRepair(t *testing.T) {
 		t.Fatal(e)
 	}
 	early, e := db.Reports(ctx, actor, l.ID, cut, observed.Add(time.Hour))
-	if e != nil || early.TransferClearing != 1000 || early.InternalCash != -1500 {
+	if e != nil || early.TransferClearing != 1000 || early.InternalCash != 0 || early.PendingTransferCash != -1000 || early.PendingTransferOut != 1000 || early.PendingTransferIn != 0 || early.UnlinkedTransfers != 1 {
 		t.Fatal("cross-day cash transfer", early, e)
+	}
+	transferCandidates, e := db.TransferCandidates(ctx, actor, l.ID, outID)
+	if e != nil || len(transferCandidates.Candidates) != 1 || transferCandidates.Candidates[0].Event.ID != inID || transferCandidates.Ambiguous {
+		t.Fatal("cross-day transfer candidate", transferCandidates, e)
+	}
+	if _, e = db.TransferCandidates(ctx, domain.ID(), l.ID, outID); e == nil {
+		t.Fatal("cross-user transfer candidates")
 	}
 	var beforeJournals, afterJournals int
 	admin.Pool.QueryRow(ctx, `SELECT count(*) FROM qb.journals WHERE ledger_id=$1`, l.ID).Scan(&beforeJournals)
@@ -223,6 +231,17 @@ func TestEvidenceAndRepair(t *testing.T) {
 	admin.Pool.QueryRow(ctx, `SELECT count(*) FROM qb.journals WHERE ledger_id=$1`, l.ID).Scan(&afterJournals)
 	if beforeJournals != afterJournals {
 		t.Fatal("transfer linkage created a third journal")
+	}
+	if _, e = db.TransferCandidates(ctx, actor, l.ID, outID); e == nil {
+		t.Fatal("linked transfer offered another candidate")
+	}
+	early, e = db.Reports(ctx, actor, l.ID, cut, observed.Add(time.Hour))
+	if e != nil || early.PendingTransferCash != -1000 || early.InternalCash != 0 {
+		t.Fatal("future arrival prematurely closed historical transfer", early, e)
+	}
+	closed, e := db.Reports(ctx, actor, l.ID, cut, later.Add(time.Hour))
+	if e != nil || closed.PendingTransferCash != 0 || closed.InternalCash != 0 || closed.ExternalCash != -1600 {
+		t.Fatal("closed full-window transfer", closed, e)
 	}
 	badOut := out
 	badOut.Kind = "EXPENSE"
@@ -235,8 +254,48 @@ func TestEvidenceAndRepair(t *testing.T) {
 		t.Fatal(e)
 	}
 	r, e = db.Reports(ctx, actor, l.ID, cut, later.Add(time.Hour))
-	if e != nil || r.TransferClearing != 0 || r.CashChange != -1600 || r.InternalCash != -500 {
+	if e != nil || r.TransferClearing != 0 || r.CashChange != -1600 || r.InternalCash != 0 || r.PendingTransferCash != 0 || r.PendingTransferIn != 1000 || r.PendingTransferOut != 1000 || r.CardRepaymentCash != -500 || r.UnlinkedTransfers != 2 {
 		t.Fatal("transfer full-window report", r, e)
+	}
+	secondIn := domain.ID()
+	if _, e = db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: secondIn, Facts: in}); e != nil {
+		t.Fatal(e)
+	}
+	sameAccount := in
+	sameAccount.FundingAccount = out.FundingAccount
+	if _, e = db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: sameAccount}); e != nil {
+		t.Fatal(e)
+	}
+	ambiguousTransfer, e := db.TransferCandidates(ctx, actor, l.ID, outID)
+	if e != nil || len(ambiguousTransfer.Candidates) != 2 || !ambiguousTransfer.Ambiguous {
+		t.Fatal("transfer ambiguity or same-account veto", ambiguousTransfer, e)
+	}
+	if _, e = db.LinkTransfer(ctx, actor, l.ID, TransferRequest{CommandID: domain.ID(), OutID: outID, InID: secondIn, OutRevision: 99, InRevision: 1}); e == nil {
+		t.Fatal("stale transfer candidate revision accepted")
+	}
+	// Non-cash assets must not enter the cash-transfer template.
+	baseline, e := db.Reports(ctx, actor, l.ID, cut, later.Add(time.Hour))
+	if e != nil {
+		t.Fatal(e)
+	}
+	investmentRaw, e := db.CreateAccount(ctx, actor, l.ID, AccountRequest{CommandID: domain.ID(), Name: "非现金投资账户", Type: "ASSET", Cash: false})
+	if e != nil {
+		t.Fatal(e)
+	}
+	var investment domain.Account
+	json.Unmarshal(investmentRaw, &investment)
+	if _, e = db.SetOpening(ctx, actor, l.ID, OpeningRequest{CommandID: domain.ID(), AccountID: investment.ID, AsOf: cut, Meaning: "BALANCE"}); e != nil {
+		t.Fatal(e)
+	}
+	investIn := in
+	investIn.Amount = 500
+	investIn.FundingAccount = investment.ID
+	if _, e = db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: investIn}); e == nil {
+		t.Fatal("non-cash asset accepted as cash-transfer leg")
+	}
+	afterInvestment, e := db.Reports(ctx, actor, l.ID, cut, later.Add(time.Hour))
+	if e != nil || afterInvestment.ExternalCash != baseline.ExternalCash || afterInvestment.CashChange != baseline.CashChange || afterInvestment.PendingTransferCash != baseline.PendingTransferCash || afterInvestment.InternalCash != baseline.InternalCash {
+		t.Fatal("rejected non-cash transfer changed cash flow", baseline, afterInvestment, e)
 	}
 	// Candidate queries inspect immutable evidence across the whole cluster.
 	notify := func(pkg, title string) domain.Delivery {

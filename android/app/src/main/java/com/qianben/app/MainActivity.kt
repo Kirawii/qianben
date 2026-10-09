@@ -779,7 +779,7 @@ class MainActivity : Activity() {
                         AlertDialog.Builder(this)
                             .setTitle("本月现金流")
                             .setMessage(
-                                "外部现金流：${money(r.getString("external_cash_minor"))}\n内部划转净额：${money(r.getString("internal_cash_minor"))}\n未分类现金净额：${money(r.getString("unresolved_cash_minor"))}"
+                                "外部现金流：${money(r.getString("external_cash_minor"))}\n其中信用卡还款：${money(r.optString("card_repayment_cash_minor", "0"))}\n已闭合内部划转净额：${money(r.getString("internal_cash_minor"))}\n待匹配转入：${money(r.optString("pending_transfer_in_minor", "0"))}\n待匹配转出：${money(r.optString("pending_transfer_out_minor", "0"))}\n未分类现金净额：${money(r.getString("unresolved_cash_minor"))}"
                             )
                             .setPositiveButton("关闭", null)
                             .show()
@@ -1346,7 +1346,8 @@ class MainActivity : Activity() {
                         if (ev.getString("status") !in listOf("MERGED", "SPLIT")) {
                             choices.addAll(listOf("合并重复事件", "拆分为两笔"))
                             choices.add("查看重复候选")
-                            if (f.optString("kind") == "TRANSFER_OUT") choices.add("关联转入端")
+                            if (f.optString("kind") in listOf("TRANSFER_OUT", "TRANSFER_IN"))
+                                choices.add("查看转账匹配候选")
                             if (f.optString("kind") in listOf("TRANSFER_OUT", "TRANSFER_IN"))
                                 choices.add("解除转账关联")
                             if (f.optString("kind") == "REIMBURSEMENT") choices.add("分配报销回款")
@@ -1396,7 +1397,7 @@ class MainActivity : Activity() {
                                         }
                                     "合并重复事件" -> mergeDialog(ev, events)
                                     "拆分为两笔" -> splitDialog(ev)
-                                    "关联转入端" -> transferDialog(ev, events)
+                                    "查看转账匹配候选" -> transferDialog(ev)
                                     "解除转账关联" -> unlinkTransferDialog(ev)
                                     "分配报销回款" -> reimbursementPage(ev)
                                     "查看重复候选" -> duplicateCandidatesPage(ev)
@@ -1767,51 +1768,87 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun transferDialog(source: JSONObject, events: JSONArray) {
-        val facts = source.getJSONObject("facts")
-        val targets =
-            (0 until events.length())
-                .map { events.getJSONObject(it) }
-                .filter {
-                    val f = it.getJSONObject("facts")
-                    it.optBoolean("posted") &&
-                        f.optString("kind") == "TRANSFER_IN" &&
-                        f.getString("amount_minor") == facts.getString("amount_minor") &&
-                        f.optString("funding_account_id") != facts.optString("funding_account_id")
+    private fun transferDialog(source: JSONObject) {
+        val generation = screenGeneration
+        task {
+            val result = JSONObject(api("transfer-candidates?event_id=${source.getString("id")}"))
+            val candidates = result.getJSONArray("candidates")
+            runOnUiThread {
+                if (generation != screenGeneration) return@runOnUiThread
+                if (result.getLong("target_revision") != source.getLong("revision")) {
+                    AlertDialog.Builder(this)
+                        .setMessage("事件已更新，请刷新后重新查看。")
+                        .setPositiveButton("知道了", null)
+                        .show()
+                    return@runOnUiThread
                 }
-        if (targets.isEmpty()) {
-            AlertDialog.Builder(this)
-                .setMessage("请先录入并确认另一账户的等额转入")
-                .setPositiveButton("知道了", null)
-                .show()
-            return
-        }
-        AlertDialog.Builder(this)
-            .setTitle("选择同一次转账的转入端")
-            .setItems(
-                targets
-                    .map {
-                        displayTime(it.getJSONObject("facts").optString("occurred_at")) +
-                            " · ¥ " +
-                            money(it.getJSONObject("facts").getString("amount_minor"))
+                if (candidates.length() == 0) {
+                    AlertDialog.Builder(this)
+                        .setMessage("七天时间窗口内未找到未关联的等额另一端；这不证明没有转账。请检查账户、金额及发生时间，勿为匹配而改写真实金额。")
+                        .setPositiveButton("知道了", null)
+                        .show()
+                    return@runOnUiThread
+                }
+                val titles =
+                    (0 until candidates.length()).map {
+                        val f =
+                            candidates
+                                .getJSONObject(it)
+                                .getJSONObject("event")
+                                .getJSONObject("facts")
+                        val account =
+                            (0 until accounts.length())
+                                .map { n -> accounts.getJSONObject(n) }
+                                .firstOrNull { a ->
+                                    a.getString("id") == f.getString("funding_account_id")
+                                }
+                                ?.getString("name") ?: "实际账户"
+                        "$account · ¥ ${money(f.getString("amount_minor"))} · ${displayTime(f.getString("occurred_at"))}"
                     }
-                    .toTypedArray()
-            ) { _, i ->
-                val target = targets[i]
-                task {
-                    api(
-                        "transfer",
-                        JSONObject()
-                            .put("command_id", id())
-                            .put("out_id", source.getString("id"))
-                            .put("in_id", target.getString("id"))
-                            .put("out_revision", source.getLong("revision"))
-                            .put("in_revision", target.getLong("revision")),
-                    )
-                    reload()
-                }
+                AlertDialog.Builder(this)
+                    .setTitle(if (result.getBoolean("ambiguous")) "多个转账候选，须核实" else "转账匹配候选")
+                    .setItems(titles.toTypedArray()) { _, i ->
+                        val target = candidates.getJSONObject(i).getJSONObject("event")
+                        val reasons = candidates.getJSONObject(i).getJSONArray("reasons")
+                        val explanation =
+                            (0 until reasons.length()).joinToString("\n") { reasons.getString(it) }
+                        AlertDialog.Builder(this)
+                            .setTitle("已核实为同一次划转？")
+                            .setMessage(
+                                explanation +
+                                    if (result.getBoolean("search_truncated"))
+                                        "\n只检查最近 500 个合格候选，未覆盖全部历史。"
+                                    else "\n关联不新增第三套转账分录。"
+                            )
+                            .setNegativeButton("取消", null)
+                            .setPositiveButton("确认关联") { _, _ ->
+                                val out =
+                                    if (
+                                        source.getJSONObject("facts").getString("kind") ==
+                                            "TRANSFER_OUT"
+                                    )
+                                        source
+                                    else target
+                                val into = if (out === source) target else source
+                                task {
+                                    api(
+                                        "transfer",
+                                        JSONObject()
+                                            .put("command_id", id())
+                                            .put("out_id", out.getString("id"))
+                                            .put("in_id", into.getString("id"))
+                                            .put("out_revision", out.getLong("revision"))
+                                            .put("in_revision", into.getLong("revision")),
+                                    )
+                                    reload()
+                                }
+                            }
+                            .show()
+                    }
+                    .setNegativeButton("关闭", null)
+                    .show()
             }
-            .show()
+        }
     }
 
     private fun splitDialog(source: JSONObject) {

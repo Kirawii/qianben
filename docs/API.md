@@ -30,6 +30,7 @@ Android 0.1.4 新采集使用 `structured` 通知格式：`version=local-notific
 | POST | `.../reimbursement` | 原子替换报销分配，空分配解除 |
 | GET | `.../reimbursement-balances` | 逐笔垫付/回款的已分配及剩余金额 |
 | GET | `.../duplicate-candidates?event_id=...` | 重复候选、理由及搜索范围 |
+| GET | `.../transfer-candidates?event_id=...` | 现金转账两端候选，仅人工核实关联 |
 | GET | `.../quality` | 同版本处理统计及待确认事件年龄 |
 | GET | `.../reports?from=...&to=...` | 同版本三套视图，左闭右开时间范围 |
 | GET | `.../assets` | 用户确认的固定资产购置与退款后原值 |
@@ -103,6 +104,10 @@ history 返回修订的 facts、evidence_ids、policy_version、source_version�
 分类、商户、备注和资产名称单独修改保存新 EventRevision 与确认依据，但沿用原分录。history 的 `accounting_revision` 指向沿用的会计修订；该次 `journals:[]` 不表示原事件未入账。会计性质、金额、实际账户或经济时间修改仍冲销重记。分类报表读取当前接受的分类。
 
 报表算法 `core-v3` 增加 `confirmed_assets_minor,confirmed_liabilities_minor,confirmed_net_worth_minor,provisional_net_worth_minor`。前两项分别排除待查资产、待查负债；后两项之和等于账面净资产。“已确认”表示用途与科目已确认，并非银行已对账。在途款仍包含在账面资产中，单独返回 transfer_clearing_minor。
+
+0.1.6 报表算法 `core-v4` 新增 `pending_transfer_cash_minor`（待匹配净额）、`pending_transfer_in_minor`/`pending_transfer_out_minor`（分别汇总转入/转出）和 `card_repayment_cash_minor`（信用卡还款现金净额，通常为负）。未关联两端不能当成内部现金；即使关系已确认，期末另一端尚未发生也保持待匹配。净额为零不代表已闭合，应结合转入/转出及未关联端数查看。信用卡还款属于 external_cash_minor，不重复计消费。cash_change_minor 始终反映区间现金类账户账面变化。
+
+转账候选要求目标与另一端均已入账、CNY 等额、反方向、不同实际账户、明确 EXACT 发生时间、没有已占用的经济关系；时间相距不超过七天，最多返回最近 500 条合格候选并披露截断及多候选歧义。响应沿用 candidate envelope 的 `event,reasons,target_revision,source_version`，算法 `transfer-review-v1`。候选不证明同一次划转，不能自动关联；人工确认使用原有 `POST .../transfer` 的两端修订号，原子关系闭合不生成第三套分录。可信交易引用及证据驱动自动闭合尚待补齐。
 
 补期初在同一事务重检并激活该账户因未初始化而阻塞的已接受流水。任何校验失败回滚期初与整批激活；经济时间不晚于启用时间的流水不重复入账。
 

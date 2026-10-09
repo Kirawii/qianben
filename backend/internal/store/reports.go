@@ -29,6 +29,10 @@ type Reports struct {
 	CashChange           domain.Amount   `json:"cash_change_minor"`
 	ExternalCash         domain.Amount   `json:"external_cash_minor"`
 	InternalCash         domain.Amount   `json:"internal_cash_minor"`
+	PendingTransferCash  domain.Amount   `json:"pending_transfer_cash_minor"`
+	PendingTransferIn    domain.Amount   `json:"pending_transfer_in_minor"`
+	PendingTransferOut   domain.Amount   `json:"pending_transfer_out_minor"`
+	CardRepaymentCash    domain.Amount   `json:"card_repayment_cash_minor"`
 	UnresolvedCash       domain.Amount   `json:"unresolved_cash_minor"`
 	UnresolvedBalance    domain.Amount   `json:"unresolved_balance_minor"`
 	ReviewCount          int64           `json:"review_count"`
@@ -42,7 +46,7 @@ type CategoryTotal struct {
 }
 
 func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Time) (Reports, error) {
-	r := Reports{From: from, To: to, Algorithm: "core-v3", Categories: []CategoryTotal{}}
+	r := Reports{From: from, To: to, Algorithm: "core-v4", Categories: []CategoryTotal{}}
 	if !from.Before(to) {
 		return r, domain.Invalid("报表时间范围无效")
 	}
@@ -56,17 +60,19 @@ func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Ti
 		return r, e
 	}
 	r.Version = l.Version
-	rows, e := tx.Query(ctx, `SELECT a.code,a.cash,(e.debit-e.credit)::text,j.effective_at,COALESCE(v.facts->>'kind','OPENING'),COALESCE(NULLIF(current_facts.facts->>'category',''),'未分类') FROM qb.entries e JOIN qb.accounts a ON a.id=e.account_id JOIN qb.journals j ON j.id=e.journal_id LEFT JOIN qb.journals original ON original.id=j.reversal_of JOIN qb.posting_revisions p ON p.id=COALESCE(original.posting_revision_id,j.posting_revision_id) LEFT JOIN qb.event_revisions v ON v.id=p.event_revision_id LEFT JOIN qb.events current_event ON current_event.id=v.event_id LEFT JOIN qb.event_revisions current_facts ON current_facts.id=current_event.current_revision_id WHERE e.ledger_id=$1`, ledger)
+	rows, e := tx.Query(ctx, `SELECT a.code,a.cash,(e.debit-e.credit)::text,j.effective_at,COALESCE(v.facts->>'kind','OPENING'),COALESCE(NULLIF(current_facts.facts->>'category',''),'未分类'),
+ COALESCE((SELECT CASE WHEN peer_account.cash THEN 'INTERNAL' ELSE 'EXTERNAL' END FROM qb.relations rel JOIN qb.events peer ON peer.id=CASE WHEN rel.from_event=current_event.id THEN rel.to_event ELSE rel.from_event END JOIN qb.event_revisions peer_facts ON peer_facts.id=peer.current_revision_id JOIN qb.accounts peer_account ON peer_account.id::text=peer_facts.facts->>'funding_account_id' AND peer_account.ledger_id=rel.ledger_id WHERE rel.ledger_id=$1 AND rel.type='TRANSFER_LEG_OF' AND rel.active AND (rel.from_event=current_event.id OR rel.to_event=current_event.id) AND peer.status NOT IN ('MERGED','SPLIT') AND (peer_facts.facts->>'occurred_at')::timestamptz<$2 AND EXISTS(SELECT 1 FROM qb.posting_intents pi WHERE pi.ledger_id=rel.ledger_id AND pi.lineage_id=peer.id AND pi.status='ACTIVE' AND pi.purpose='ECONOMIC') LIMIT 1),'PENDING')
+ FROM qb.entries e JOIN qb.accounts a ON a.id=e.account_id JOIN qb.journals j ON j.id=e.journal_id LEFT JOIN qb.journals original ON original.id=j.reversal_of JOIN qb.posting_revisions p ON p.id=COALESCE(original.posting_revision_id,j.posting_revision_id) LEFT JOIN qb.event_revisions v ON v.id=p.event_revision_id LEFT JOIN qb.events current_event ON current_event.id=v.event_id LEFT JOIN qb.event_revisions current_facts ON current_facts.id=current_event.current_revision_id WHERE e.ledger_id=$1`, ledger, to)
 	if e != nil {
 		return r, e
 	}
 	var suspenseAsset, suspenseLiability domain.Amount
 	categories := map[string]domain.Amount{}
 	for rows.Next() {
-		var code, value, kind, category string
+		var code, value, kind, category, transferClass string
 		var cash bool
 		var at time.Time
-		if e = rows.Scan(&code, &cash, &value, &at, &kind, &category); e != nil {
+		if e = rows.Scan(&code, &cash, &value, &at, &kind, &category, &transferClass); e != nil {
 			rows.Close()
 			return r, e
 		}
@@ -128,14 +134,36 @@ func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Ti
 			}
 		}
 		if cash {
+			if kind == "CARD_REPAYMENT" {
+				if e = add(&r.CardRepaymentCash); e != nil {
+					rows.Close()
+					return r, e
+				}
+			}
+			if (kind == "TRANSFER_IN" || kind == "TRANSFER_OUT") && transferClass == "PENDING" {
+				if kind == "TRANSFER_IN" {
+					e = add(&r.PendingTransferIn)
+				} else {
+					r.PendingTransferOut, e = domain.Subtract(r.PendingTransferOut, amount)
+				}
+				if e != nil {
+					rows.Close()
+					return r, e
+				}
+			}
 			if e = add(&r.CashChange); e != nil {
 				rows.Close()
 				return r, e
 			}
 			target := &r.ExternalCash
 			switch kind {
-			case "TRANSFER_OUT", "TRANSFER_IN", "CARD_REPAYMENT":
-				target = &r.InternalCash
+			case "TRANSFER_OUT", "TRANSFER_IN":
+				switch transferClass {
+				case "INTERNAL":
+					target = &r.InternalCash
+				case "PENDING":
+					target = &r.PendingTransferCash
+				}
 			case "CASH_OUT", "CASH_IN":
 				target = &r.UnresolvedCash
 			}
@@ -203,7 +231,7 @@ func (d *DB) Reports(ctx context.Context, actor, ledger string, from, to time.Ti
 	if e != nil {
 		return r, e
 	}
-	e = tx.QueryRow(ctx, `SELECT count(*) FROM qb.events ev JOIN qb.event_revisions v ON v.id=ev.current_revision_id WHERE ev.ledger_id=$1 AND v.facts->>'kind' IN ('TRANSFER_OUT','TRANSFER_IN') AND ev.status NOT IN ('MERGED','SPLIT') AND NOT EXISTS(SELECT 1 FROM qb.relations r WHERE r.ledger_id=ev.ledger_id AND r.type='TRANSFER_LEG_OF' AND r.active AND (r.from_event=ev.id OR r.to_event=ev.id))`, ledger).Scan(&r.UnlinkedTransfers)
+	e = tx.QueryRow(ctx, `SELECT count(*) FROM qb.events ev JOIN qb.event_revisions v ON v.id=ev.current_revision_id WHERE ev.ledger_id=$1 AND v.facts->>'kind' IN ('TRANSFER_OUT','TRANSFER_IN') AND ev.status NOT IN ('MERGED','SPLIT') AND (v.facts->>'occurred_at')::timestamptz<$2 AND EXISTS(SELECT 1 FROM qb.posting_intents p WHERE p.ledger_id=ev.ledger_id AND p.lineage_id=ev.id AND p.purpose='ECONOMIC' AND p.status='ACTIVE') AND NOT EXISTS(SELECT 1 FROM qb.relations r WHERE r.ledger_id=ev.ledger_id AND r.type='TRANSFER_LEG_OF' AND r.active AND (r.from_event=ev.id OR r.to_event=ev.id))`, ledger, to).Scan(&r.UnlinkedTransfers)
 	if e != nil {
 		return r, e
 	}
