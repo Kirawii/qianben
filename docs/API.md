@@ -6,6 +6,10 @@
 
 Android 0.1.4 新采集使用 `structured` 通知格式：`version=local-notification-v1`、字符串分金额 `amount_minor`、`currency=CNY|UNKNOWN`、`kind=UNKNOWN|CASH_IN|CASH_OUT`、64 位小写 SHA-256 `raw_hash`。`text`/`big_text` 必须为空；标题为支付固定服务名或银行来源标签。结构化内容是本地抽取提示，不证明实际账户、经济发生时间、用途或对账状态。客户端保留来源对象、快照号及采集/通知时间；服务端保存结构化不可变证据和解析器版本。未知版本或混入正文拒绝。旧版已排队通知仍兼容原格式，应先升级服务端再升级手机。
 
+`POST .../funding` 请求含 `command_id`、`expected_version`（GET 返回的账本版本）、`rail=WECHAT|ALIPAY|UNIONPAY`、`account_id`、RFC3339 `effective_from`、可选 `effective_to` 及 `note`。空账户表示明确停用偏好。记录只追加；同一通道同一生效时点不可重复，重复 command_id 原内容重试返回原结果。某时点采用不晚于它的最新生效记录；该记录停用或到期时返回无候选，不恢复旧记录。偏好变化不生成分录。
+
+`GET .../funding?rail=WECHAT&at=...&event_id=...` 参数均可选，返回 `source_version`、最近 200 条 `preferences`、`candidate` 和该事件的 `proofs`。候选明确标记 `proves_actual_funding=false`。新 `POST .../events` 手动确认在同一事务记录 USER_CONFIRMED 资金账户和还款目标关系，绑定修订与原始确认 observation；改选账户不覆盖旧依据。TRANSACTION_EVIDENCE 类型保留为独立类型，目前没有可信通知模板自动写入入口，也不允许客户端在偏好接口冒充该类型。旧版确认没有被伪造回填。
+
 当前新采集不持久化通知全文，因此不能对原文重新解析；摘要哈希只能标识原快照，不能还原或独立证明原文。结构化事实与账务历史可查看回放。原始抽取片段、本地原文保留期限和用户授权诊断上传仍须补齐。
 
 | 方法 | 路径 | 用途 |
@@ -16,6 +20,7 @@ Android 0.1.4 新采集使用 `structured` 通知格式：`version=local-notific
 | POST | `.../opening` | 确认统一时点的期初 |
 | GET / POST | `.../events` | 事件列表 / 确认或修订 |
 | POST | `.../observations` | 分项持久化 ACK 的通知批次 |
+| GET / POST | `.../funding` | 时间化支付偏好、仅候选的查询和事件资金来源确认依据 |
 | POST | `.../csv` | 有明确账户的 CSV 原子导入 |
 | GET | `.../evidence?event_id=...` | 原始版本化证据 |
 | GET | `.../history?event_id=...&before_revision=...` | 每页 100 次修订及分录，游标为上一页最后修订号，排除该号；首请求省略游标 |

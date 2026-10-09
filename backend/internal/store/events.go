@@ -245,7 +245,14 @@ func (d *DB) SaveEvent(ctx context.Context, actor, ledger string, r EventRequest
 				return nil, e
 			}
 		}
-		return writeEvent(ctx, tx, l, r.EventID, revision, r.Facts, append(ids, obs))
+		ev, err := writeEvent(ctx, tx, l, r.EventID, revision, r.Facts, append(ids, obs))
+		if err != nil {
+			return nil, err
+		}
+		if err = recordUserFunding(ctx, tx, l, actor, r.EventID, obs, r.Facts); err != nil {
+			return nil, err
+		}
+		return ev, nil
 	})
 }
 func (d *DB) Events(ctx context.Context, actor, ledger string) ([]domain.Event, error) {

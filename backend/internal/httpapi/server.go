@@ -89,6 +89,31 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	ledger := parts[2]
 	switch parts[3] {
+	case "funding":
+		switch r.Method {
+		case "GET":
+			var at time.Time
+			if raw := r.URL.Query().Get("at"); raw != "" {
+				var err error
+				at, err = time.Parse(time.RFC3339, raw)
+				if err != nil {
+					respond(w, nil, domain.Invalid("偏好查询时间无效"))
+					return
+				}
+			}
+			v, e := s.DB.Funding(r.Context(), actor, ledger, r.URL.Query().Get("event_id"), r.URL.Query().Get("rail"), at)
+			respond(w, v, e)
+		case "POST":
+			var req store.FundingPreferenceRequest
+			if e = decode(w, r, &req); e != nil {
+				respond(w, nil, e)
+				return
+			}
+			v, e := s.DB.SetFundingPreference(r.Context(), actor, ledger, req)
+			respond(w, v, e)
+		default:
+			w.WriteHeader(405)
+		}
 	case "history":
 		if r.Method != "GET" {
 			w.WriteHeader(405)

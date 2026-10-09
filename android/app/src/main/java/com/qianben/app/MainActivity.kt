@@ -527,6 +527,7 @@ class MainActivity : Activity() {
                 }
             }
             button("管理商户分类规则") { rulePage() }
+            button("管理支付偏好") { fundingPage() }
             button("查看数据质量") { qualityPage() }
             button("删除当前账本") {
                 val input = EditText(this).apply { hint = "输入完整账本名称" }
@@ -822,6 +823,79 @@ class MainActivity : Activity() {
                 }
                 label("账本版本 ${r.getLong("source_version")} · 未录入账户和期初会影响完整性。", 12f)
                 button("刷新账本") { reload() }
+            }
+        }
+    }
+
+    private fun fundingPage() {
+        screenGeneration++
+        val generation = screenGeneration
+        content.removeAllViews()
+        label("支付偏好", 22f)
+        label("仅作为账户候选，不会自动入账。后来的生效记录覆盖较早记录；停用或到期后不恢复旧偏好。", 14f)
+        button("返回设置") { render() }
+        task {
+            val result = JSONObject(api("funding"))
+            runOnUiThread {
+                if (generation != screenGeneration || page != "设置") return@runOnUiThread
+                val rails = listOf("WECHAT", "ALIPAY", "UNIONPAY")
+                val rail = spinner("支付通道", listOf("微信支付", "支付宝", "银联"))
+                val actual =
+                    (0 until accounts.length())
+                        .map { accounts.getJSONObject(it) }
+                        .filter { it.getString("code").startsWith("user.") }
+                val account =
+                    spinner(
+                        "偏好账户",
+                        listOf("请选择账户或停用", "停用该通道偏好") + actual.map { it.getString("name") },
+                    )
+                val from = field("生效时间（本机时区）", displayTime(""))
+                val until = field("到期时间（可留空）")
+                val note = field("备注（可选）")
+                val command = id()
+                button("保存偏好变化") {
+                    task {
+                        require(account.selectedItemPosition > 0) { "请先选择账户或明确停用偏好" }
+                        val req =
+                            JSONObject()
+                                .put("command_id", command)
+                                .put("expected_version", result.getLong("source_version"))
+                                .put("rail", rails[rail.selectedItemPosition])
+                                .put(
+                                    "account_id",
+                                    if (account.selectedItemPosition == 1) ""
+                                    else actual[account.selectedItemPosition - 2].getString("id"),
+                                )
+                                .put("effective_from", instant(from.text.toString()))
+                                .put("note", note.text.toString())
+                        if (until.text.isNotBlank())
+                            req.put("effective_to", instant(until.text.toString()))
+                        api("funding", req)
+                        runOnUiThread { fundingPage() }
+                    }
+                }
+                label("最近 200 条变化（按生效时间）", 16f)
+                val records = result.getJSONArray("preferences")
+                if (records.length() == 0) label("尚未设置支付偏好。")
+                for (i in 0 until records.length()) {
+                    val p = records.getJSONObject(i)
+                    val railName =
+                        when (p.getString("rail")) {
+                            "WECHAT" -> "微信支付"
+                            "ALIPAY" -> "支付宝"
+                            else -> "银联"
+                        }
+                    card {
+                        label(
+                            "$railName · ${if (p.isNull("account_id")) "停用偏好" else p.getString("account_name")}",
+                            17f,
+                        )
+                        label("生效 ${displayTime(p.getString("effective_from"))}", 13f)
+                        if (!p.isNull("effective_to"))
+                            label("到期 ${displayTime(p.getString("effective_to"))}", 13f)
+                        if (p.optString("note").isNotBlank()) label(p.getString("note"), 13f)
+                    }
+                }
             }
         }
     }
@@ -1268,7 +1342,7 @@ class MainActivity : Activity() {
                     if (ev.getString("status") !in listOf("MERGED", "SPLIT"))
                         button("查看并确认") { eventForm(ev) }
                     button("更多操作") {
-                        val choices = mutableListOf("查看证据", "查看修订历史")
+                        val choices = mutableListOf("查看证据", "查看修订历史", "查看资金来源依据")
                         if (ev.getString("status") !in listOf("MERGED", "SPLIT")) {
                             choices.addAll(listOf("合并重复事件", "拆分为两笔"))
                             choices.add("查看重复候选")
@@ -1281,6 +1355,30 @@ class MainActivity : Activity() {
                             .setTitle("事件操作")
                             .setItems(choices.toTypedArray()) { _, n ->
                                 when (choices[n]) {
+                                    "查看资金来源依据" ->
+                                        task {
+                                            val result =
+                                                JSONObject(
+                                                    api("funding?event_id=${ev.getString("id")}")
+                                                )
+                                            val proofs = result.getJSONArray("proofs")
+                                            val text =
+                                                (0 until proofs.length()).joinToString("\n\n") {
+                                                    val p = proofs.getJSONObject(it)
+                                                    "第 ${p.getLong("revision")} 版 · ${if (p.getString("leg") == "FUNDING") "资金账户" else "还款目标"}\n${p.getString("account_name")} · 用户明确确认\n证据 ${p.getString("observation_id")}\n${if(p.getBoolean("current_revision")) "当前修订依据" else "历史修订依据"}"
+                                                }
+                                            runOnUiThread {
+                                                AlertDialog.Builder(this@MainActivity)
+                                                    .setTitle("资金来源依据")
+                                                    .setMessage(
+                                                        text.ifBlank {
+                                                            "尚无独立记录的确认依据。旧版本确认记录可在证据与修订历史中查看。默认支付偏好不能证明真实扣款账户。"
+                                                        }
+                                                    )
+                                                    .setPositiveButton("关闭", null)
+                                                    .show()
+                                            }
+                                        }
                                     "查看修订历史" -> historyPage(ev)
                                     "查看证据" ->
                                         task {
