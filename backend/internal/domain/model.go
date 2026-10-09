@@ -84,19 +84,20 @@ type Account struct {
 	LastBalanceCheckAt *time.Time `json:"last_balance_check_at,omitempty"`
 }
 type Facts struct {
-	Kind               string     `json:"kind"`
-	Amount             Amount     `json:"amount_minor"`
-	Currency           string     `json:"currency"`
-	OccurredAt         *time.Time `json:"occurred_at"`
-	TimePrecision      string     `json:"time_precision"`
-	FundingAccount     string     `json:"funding_account_id"`
-	RepaymentAccount   string     `json:"repayment_account_id,omitempty"`
-	Merchant           string     `json:"merchant"`
-	Category           string     `json:"category"`
-	OriginalEvent      string     `json:"original_event_id,omitempty"`
-	HistoricalOriginal bool       `json:"historical_original,omitempty"`
-	AssetTitle         string     `json:"asset_title,omitempty"`
-	Note               string     `json:"note,omitempty"`
+	Foreign            *ForeignSettlement `json:"foreign,omitempty"`
+	Kind               string             `json:"kind"`
+	Amount             Amount             `json:"amount_minor"`
+	Currency           string             `json:"currency"`
+	OccurredAt         *time.Time         `json:"occurred_at"`
+	TimePrecision      string             `json:"time_precision"`
+	FundingAccount     string             `json:"funding_account_id"`
+	RepaymentAccount   string             `json:"repayment_account_id,omitempty"`
+	Merchant           string             `json:"merchant"`
+	Category           string             `json:"category"`
+	OriginalEvent      string             `json:"original_event_id,omitempty"`
+	HistoricalOriginal bool               `json:"historical_original,omitempty"`
+	AssetTitle         string             `json:"asset_title,omitempty"`
+	Note               string             `json:"note,omitempty"`
 }
 type Event struct {
 	ID          string   `json:"id"`

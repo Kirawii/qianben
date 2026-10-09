@@ -37,6 +37,11 @@ func eventTx(ctx context.Context, tx pgx.Tx, ledger, id string) (domain.Event, e
 	return ev, e
 }
 func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revision int64, f domain.Facts, evidence []string, policy ...string) (domain.Event, error) {
+	var foreignErr error
+	f, foreignErr = domain.NormalizeForeign(f)
+	if foreignErr != nil {
+		return domain.Event{}, foreignErr
+	}
 	ev := domain.Event{ID: id, Revision: revision + 1, Facts: f, EvidenceIDs: evidence, Status: "ACTIVE"}
 	if evidence == nil {
 		ev.EvidenceIDs = []string{}
@@ -54,7 +59,7 @@ func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revi
 	if f.Kind == "CARD_REPAYMENT" && f.RepaymentAccount != "" {
 		p, e = accounting.Repayment(l, f, all[f.FundingAccount], all[f.RepaymentAccount])
 	}
-	if f.Amount == 0 && f.Kind == "UNKNOWN" {
+	if f.Amount == 0 && f.Kind == "UNKNOWN" && f.Foreign == nil {
 		e = &accounting.Blocked{Reason: "AMOUNT_REQUIRED"}
 	}
 	if e != nil {
@@ -108,6 +113,7 @@ func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revi
 			return ev, err
 		}
 		normalize := func(f domain.Facts) domain.Facts {
+			f.Foreign = nil
 			f.Category, f.Merchant, f.Note, f.AssetTitle = "", "", "", ""
 			if f.OccurredAt != nil {
 				at := f.OccurredAt.UTC()
@@ -176,11 +182,16 @@ func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revi
 	return ev, e
 }
 func (d *DB) SaveEvent(ctx context.Context, actor, ledger string, r EventRequest) (json.RawMessage, error) {
+	var foreignErr error
+	r.Facts, foreignErr = domain.NormalizeForeign(r.Facts)
+	if foreignErr != nil {
+		return nil, foreignErr
+	}
 	if r.Facts.OccurredAt != nil {
 		at := r.Facts.OccurredAt.Truncate(time.Microsecond)
 		r.Facts.OccurredAt = &at
 	}
-	if !domain.IsUUID(r.EventID) || r.Facts.Amount <= 0 || len(r.Facts.Merchant) > 200 || len(r.Facts.Note) > 2000 || len(r.Facts.Category) > 100 {
+	if !domain.IsUUID(r.EventID) || r.Facts.Amount < 0 || (r.Facts.Amount == 0 && r.Facts.Foreign == nil) || len(r.Facts.Merchant) > 200 || len(r.Facts.Note) > 2000 || len(r.Facts.Category) > 100 {
 		return nil, domain.Invalid("事件字段无效")
 	}
 	return command(ctx, d, actor, ledger, r.CommandID, r, "EVENT_CONFIRMED", func(tx pgx.Tx, l domain.Ledger) (any, error) {

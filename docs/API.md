@@ -2,6 +2,10 @@
 
 所有 `/v1` 请求必须使用 `Authorization: Bearer <token>`。身份来自令牌，账本权限来自服务端，客户端不能指定 actor。金额 JSON 为整数**字符串**，例如 `"2350"`，单位分。时间为 RFC3339；数据库精度为微秒。错误返回 `{code,message}`，内部异常不包含证据正文。
 
+0.1.7 事件 Facts 可附 `foreign`：`original_amount` 为正十进制**字符串**（至多 12 位整数、6 位小数，无指数/分数表达式），`original_currency` 为用户声明的三位非 CNY 代码，`cny_settlement_confirmed` 表示用户是否核实最终 CNY 金额。未确认时 `amount_minor` 必须为 `"0"`，服务端将 currency 规范为 UNKNOWN 并保持 CNY_SETTLEMENT_REQUIRED，不得把估算值作为已结算金额；此时可先留空实际账户和发生时间。确认时须有正 CNY 分金额，再按通常账户/时间规则决定入账。
+
+可选参考值 `reference_rate,reference_source,reference_at` 必须同时完整提供；它们是用户提供的参考信息，不被用于计算分录。结算确认后服务端根据 `(CNY分金额/100)/原币金额` 推导 `derived_rate`（12 位小数的近似显示）、精确的 `derived_rate_numerator/derived_rate_denominator` 与 `rate_source=SETTLEMENT_DERIVED_USER_CONFIRMED`，忽略客户端伪造的推导值或来源。修改原币元数据而 CNY 实际金额/账户/时间/性质不变时不重记；撤回确认并把 amount_minor 归零会原子冲销。每次接受的原币/结算信息仍保存在不可变修订和确认快照中。原币元数据不构成外币账户、报价服务或已验证银行结算声明。
+
 ## 路由
 
 Android 0.1.4 新采集使用 `structured` 通知格式：`version=local-notification-v1`、字符串分金额 `amount_minor`、`currency=CNY|UNKNOWN`、`kind=UNKNOWN|CASH_IN|CASH_OUT`、64 位小写 SHA-256 `raw_hash`。`text`/`big_text` 必须为空；标题为支付固定服务名或银行来源标签。结构化内容是本地抽取提示，不证明实际账户、经济发生时间、用途或对账状态。客户端保留来源对象、快照号及采集/通知时间；服务端保存结构化不可变证据和解析器版本。未知版本或混入正文拒绝。旧版已排队通知仍兼容原格式，应先升级服务端再升级手机。

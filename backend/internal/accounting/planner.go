@@ -10,7 +10,15 @@ type Blocked struct{ Reason string }
 func (e *Blocked) Error() string { return e.Reason }
 func Plan(ledger domain.Ledger, f domain.Facts, accounts map[string]domain.Account, system map[string]string) (domain.Plan, error) {
 	p := domain.Plan{Purpose: "ECONOMIC"}
+	var foreignErr error
+	f, foreignErr = domain.NormalizeForeign(f)
+	if foreignErr != nil {
+		return p, foreignErr
+	}
 	block := func(s string) (domain.Plan, error) { return p, &Blocked{s} }
+	if f.Foreign != nil && !f.Foreign.CNYConfirmed {
+		return block("CNY_SETTLEMENT_REQUIRED")
+	}
 	if f.Amount <= 0 || f.Amount > domain.Amount(9_000_000_000_000_000) {
 		return p, domain.Invalid("金额须为有效的正整数分")
 	}

@@ -95,6 +95,13 @@ class MainActivity : Activity() {
             .toInstant()
             .toString()
 
+    private fun eventMoney(facts: JSONObject): String {
+        val foreign = facts.optJSONObject("foreign")
+        return if (foreign != null && !foreign.optBoolean("cny_settlement_confirmed"))
+            "${foreign.optString("original_currency")} ${foreign.optString("original_amount")} · 待人民币结算"
+        else "¥ ${money(facts.getString("amount_minor"))}"
+    }
+
     private fun shape(color: Int = surface, radius: Int = 16, border: Boolean = false) =
         GradientDrawable().apply {
             setColor(color)
@@ -1115,19 +1122,44 @@ class MainActivity : Activity() {
         kind.setSelection(kinds.indexOf(facts.optString("kind")).coerceAtLeast(0))
         val amount =
             field(
-                "金额（元）",
+                "人民币金额（元）",
                 if (facts.has("amount_minor") && !requiresCNY)
                     money(facts.getString("amount_minor"))
                 else "",
                 true,
             )
+        val previousForeign = facts.optJSONObject("foreign")
+        val foreignEnabled =
+            CheckBox(this).apply {
+                text = "记录外币原始金额"
+                isChecked = previousForeign != null || requiresCNY
+            }
+        content.addView(foreignEnabled)
+        val originalCurrency =
+            field("原币代码（如 USD、JPY）", previousForeign?.optString("original_currency").orEmpty())
+        val originalAmount =
+            field("原币金额（不是人民币分金额）", previousForeign?.optString("original_amount").orEmpty(), true)
+        val cnyConfirmed =
+            CheckBox(this).apply {
+                text = "已核对最终人民币结算金额"
+                isChecked = previousForeign?.optBoolean("cny_settlement_confirmed") ?: false
+            }
+        content.addView(cnyConfirmed)
+        if (previousForeign?.optString("derived_rate")?.isNotBlank() == true) {
+            val rate = previousForeign.getString("derived_rate").trimEnd('0').trimEnd('.')
+            label(
+                "已接受修订的结算推导汇率约 $rate 人民币 / 1 ${previousForeign.getString("original_currency")}，由用户确认的结算推导，非外部报价。",
+                13f,
+            )
+        }
+        if (previousForeign?.optString("reference_rate")?.isNotBlank() == true)
+            label("用户提供的参考汇率 ${previousForeign.getString("reference_rate")}；仅供参考，不能用于正式入账。", 13f)
         val available =
             (0 until accounts.length())
                 .map { accounts.getJSONObject(it) }
                 .filter { it.getString("code").startsWith("user.") && it.getBoolean("initialized") }
         if (available.isEmpty()) {
-            label("请先添加账户并设置期初余额")
-            return
+            label("正式入账请先添加账户并设置期初余额；外币待结算记录可先保存。")
         }
         val account =
             spinner("实际付款 / 收款账户", listOf("请选择实际账户") + available.map { it.getString("name") })
@@ -1217,6 +1249,11 @@ class MainActivity : Activity() {
             showField(card, selected == "CARD_REPAYMENT")
             historical.visibility =
                 if (selected == "REFUND") android.view.View.VISIBLE else android.view.View.GONE
+            showField(originalCurrency, foreignEnabled.isChecked)
+            showField(originalAmount, foreignEnabled.isChecked)
+            cnyConfirmed.visibility =
+                if (foreignEnabled.isChecked) android.view.View.VISIBLE else android.view.View.GONE
+            showField(amount, !foreignEnabled.isChecked || cnyConfirmed.isChecked)
         }
         kind.onItemSelectedListener =
             object : AdapterView.OnItemSelectedListener {
@@ -1232,20 +1269,35 @@ class MainActivity : Activity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) {}
             }
         updateFields()
+        foreignEnabled.setOnCheckedChangeListener { _, _ -> updateFields() }
+        cnyConfirmed.setOnCheckedChangeListener { _, _ -> updateFields() }
         button("确认保存") {
             task {
-                require(account.selectedItemPosition > 0) { "请选择真实付款或收款账户" }
+                val pendingForeign = foreignEnabled.isChecked && !cnyConfirmed.isChecked
+                require(account.selectedItemPosition > 0 || pendingForeign) { "请选择真实付款或收款账户" }
                 val selectedKind = kinds[kind.selectedItemPosition]
                 val f =
                     JSONObject()
                         .put("kind", kinds[kind.selectedItemPosition])
-                        .put("amount_minor", minor(amount.text.toString()))
-                        .put("currency", "CNY")
-                        .put("occurred_at", instant(at.text.toString()))
-                        .put("time_precision", "EXACT")
+                        .put(
+                            "amount_minor",
+                            if (pendingForeign) "0" else minor(amount.text.toString()),
+                        )
+                        .put("currency", if (pendingForeign) "UNKNOWN" else "CNY")
+                        .put(
+                            "occurred_at",
+                            if (pendingForeign && at.text.isBlank()) JSONObject.NULL
+                            else instant(at.text.toString()),
+                        )
+                        .put(
+                            "time_precision",
+                            if (pendingForeign && at.text.isBlank()) "UNKNOWN" else "EXACT",
+                        )
                         .put(
                             "funding_account_id",
-                            available[account.selectedItemPosition - 1].getString("id"),
+                            if (account.selectedItemPosition > 0)
+                                available[account.selectedItemPosition - 1].getString("id")
+                            else "",
                         )
                         .put("merchant", merchant.text.toString())
                         .put("category", category.text.toString())
@@ -1258,6 +1310,22 @@ class MainActivity : Activity() {
                             "historical_original",
                             selectedKind == "REFUND" && historical.isChecked,
                         )
+                if (foreignEnabled.isChecked) {
+                    val foreign =
+                        JSONObject(previousForeign?.toString() ?: "{}")
+                            .put(
+                                "original_currency",
+                                originalCurrency.text
+                                    .toString()
+                                    .trim()
+                                    .uppercase(java.util.Locale.ROOT),
+                            )
+                            .put("original_amount", originalAmount.text.toString().trim())
+                            .put("cny_settlement_confirmed", cnyConfirmed.isChecked)
+                    foreign.remove("derived_rate")
+                    foreign.remove("rate_source")
+                    f.put("foreign", foreign)
+                }
                 if (
                     original.selectedItemPosition > 0 &&
                         selectedKind in listOf("REFUND", "ASSET_REFUND")
@@ -1335,7 +1403,14 @@ class MainActivity : Activity() {
                 for (ev in visible) card {
                     val f = ev.getJSONObject("facts")
                     label(f.optString("merchant").ifBlank { "未识别商户" }, 18f)
-                    label("¥ ${money(f.getString("amount_minor"))}", 24f)
+                    label(eventMoney(f), 24f)
+                    f.optJSONObject("foreign")?.let {
+                        if (it.optBoolean("cny_settlement_confirmed"))
+                            label(
+                                "原币 ${it.getString("original_currency")} ${it.getString("original_amount")} · 人民币结算由用户确认",
+                                13f,
+                            )
+                    }
                     label(eventStatus(ev), 14f)
                     if (!f.isNull("occurred_at"))
                         label(displayTime(f.getString("occurred_at")), 12f)
@@ -1676,9 +1751,7 @@ class MainActivity : Activity() {
                     card {
                         label("第 ${v.getLong("revision")} 次修订", 18f)
                         label(displayTime(v.getString("created_at")), 12f)
-                        label(
-                            "${f.optString("merchant").ifBlank { "未识别商户" }} · ¥ ${money(f.getString("amount_minor"))}"
-                        )
+                        label("${f.optString("merchant").ifBlank { "未识别商户" }} · ${eventMoney(f)}")
                         label(
                             "${f.optString("category").ifBlank { "未分类" }} · ${f.optString("note").ifBlank { "无备注" }}",
                             14f,
