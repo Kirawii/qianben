@@ -126,3 +126,14 @@ quality 返回已入账、自动入账、带手动/CSV 依据的事件数及待�
 `GET /v1/ledgers/{ledger}/historical-analysis?from=RFC3339&to=RFC3339` 在一致性快照读取当前历史事件，返回 source_version、algorithm_version=historical-v2、cutover_time 和 [from,to) 区间。只统计 `HISTORICAL_ONLY` 且发生时间不晚于起点的当前有效修订，合并/拆分终止事件不计入。
 
 `gross_consumption_minor` 为 CNY EXPENSE 与 ASSET_PURCHASE 的退款前消费总額；categories 是扣除有效关联退款后的分类。included_count 为计入笔数；excluded_count 和 excluded 按 kind 列出其余历史事件的笔数与 CNY 金额。转账、垫付、待查款及未关联历史退款不算消费；`refund_minor` 为已建立 REFUND_OF 关系的区间内历史退款；`net_consumption_minor` 为原消费减关联退款，分类按原消费当前分类冲减。退款发生区间可以只有退款而呈负数，符合 D-03。未关联退款仍在 excluded。历史金额不是正式会计分录，不改期初、现金流或净资产，不证明账单完整或正式对账。
+
+## 个人支付账单预览（适配进行中）
+
+`POST /v1/ledgers/{ledger}/csv-preview` 接受 `{format,content}`，支持明确表头契约 `WECHAT_PERSONAL_V1` / `ALIPAY_PERSONAL_V1`。返回 native-preview-v1、逐行交易号/来源时间/金额/交易对方/支付方式/原始类型/状态/方向和支付方式列表。来源无时区的时间按该契约的 UTC+08:00 解释，不等同经过银行核验的经济时间。预览不写证据、事件、分录或版本，不等同导入。
+
+只接受有效 UTF-8、800 KB/2000 行；最多在前 60 条 CSV 记录寻找精确且无重复的字段集。保留前言允许，未识别表尾、额外列、重复/缺失交易号、无效金额或时间会拒绝。金额按十进制整数分解析，拒绝浮点指数、负数和非两位小数。未知收支方向保留 UNKNOWN，原始交易状态不被强制解释为完成。不会读取对方账号/备注，也不推断实际资金账户。
+
+微信表头字段集：交易时间,交易类型,交易对方,商品,收/支,金额(元),支付方式,当前状态,交易单号,商户单号,备注。
+支付宝表头字段集：交易时间,交易分类,交易对方,对方账号,商品说明,收/支,金额,收/付款方式,交易状态,交易订单号,商家订单号,备注。
+
+这两个契约只经合成样例验证，尚未用用户当前真实导出核对，不宣称覆盖所有版本或证明来源真实性。资金账户映射、状态处理、确认导入与 Android 入口仍待接入；现有 `/csv` 继续只接受钱本标准格式，不能把预览结果当作已导入。

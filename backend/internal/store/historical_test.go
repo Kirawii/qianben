@@ -51,6 +51,22 @@ func TestHistoricalAnalysisDoesNotRepost(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := cut.Add(-time.Hour)
+	native := NativeCSVRequest{Format: "WECHAT_PERSONAL_V1", Content: "交易时间,交易类型,交易对方,商品,收/支,金额(元),支付方式,当前状态,交易单号,商户单号,备注\n2026-09-30 12:00:00,商户消费,合成食堂,午餐,支出,12.34,零钱,支付成功,preview1,m1,/\n"}
+	beforePreview, e := db.Reports(ctx, actor, l.ID, at, cut.Add(time.Hour))
+	if e != nil {
+		t.Fatal(e)
+	}
+	preview, e := db.PreviewNativeCSV(ctx, actor, l.ID, native)
+	if e != nil || len(preview.Rows) != 1 {
+		t.Fatal(preview, e)
+	}
+	afterPreview, e := db.Reports(ctx, actor, l.ID, at, cut.Add(time.Hour))
+	if e != nil || afterPreview.Version != beforePreview.Version || afterPreview.Assets != beforePreview.Assets {
+		t.Fatal("preview mutated ledger", afterPreview, e)
+	}
+	if _, e = db.PreviewNativeCSV(ctx, domain.ID(), l.ID, native); e == nil {
+		t.Fatal("cross-user preview")
+	}
 	csv := CSVRequest{CommandID: domain.ID(), AccountID: a.ID, Content: "record_id,occurred_at,amount_minor,kind,merchant,category\nh1," + at.Format(time.RFC3339) + ",1234,EXPENSE,食堂,餐饮\nh2," + cut.Format(time.RFC3339) + ",200,TRANSFER_OUT,划转,\nh3," + cut.Add(time.Minute).Format(time.RFC3339) + ",100,EXPENSE,早餐,餐饮\n"}
 	if _, err = db.ImportCSV(ctx, actor, l.ID, csv); err != nil {
 		t.Fatal(err)

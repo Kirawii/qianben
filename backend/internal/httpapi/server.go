@@ -250,6 +250,18 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		v, e := s.DB.ImportCSV(r.Context(), actor, ledger, req)
 		respond(w, v, e)
+	case "csv-preview":
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		var req store.NativeCSVRequest
+		if e = decode(w, r, &req); e != nil {
+			respond(w, nil, e)
+			return
+		}
+		v, e := s.DB.PreviewNativeCSV(r.Context(), actor, ledger, req)
+		respond(w, v, e)
 	case "merge":
 		if r.Method != "POST" {
 			w.WriteHeader(405)
