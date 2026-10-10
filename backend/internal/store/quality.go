@@ -21,7 +21,7 @@ func (d *DB) Quality(ctx context.Context, actor, ledger string) (json.RawMessage
  SELECT ev.id,ev.status,ev.review_reason,ev.created_at,
  EXISTS(SELECT 1 FROM qb.posting_intents p WHERE p.ledger_id=ev.ledger_id AND p.lineage_id=ev.id AND p.purpose='ECONOMIC' AND p.status='ACTIVE') posted,
  EXISTS(SELECT 1 FROM jsonb_array_elements_text(v.evidence_ids) ref JOIN qb.observations o ON o.id=ref.value::uuid JOIN qb.source_events s ON s.id=o.source_event_id WHERE s.source_identity='manual.confirmation') manual,
- EXISTS(SELECT 1 FROM jsonb_array_elements_text(v.evidence_ids) ref JOIN qb.observations o ON o.id=ref.value::uuid JOIN qb.source_events s ON s.id=o.source_event_id WHERE s.source_identity LIKE 'csv.account:%') imported
+ EXISTS(SELECT 1 FROM jsonb_array_elements_text(v.evidence_ids) ref JOIN qb.observations o ON o.id=ref.value::uuid JOIN qb.source_events s ON s.id=o.source_event_id WHERE s.source_identity LIKE 'csv.account:%' OR s.source_identity LIKE 'csv.native:%') imported
  FROM qb.events ev JOIN qb.event_revisions v ON v.id=ev.current_revision_id WHERE ev.ledger_id=$1 AND ev.status NOT IN ('MERGED','SPLIT')
  ) SELECT jsonb_build_object('source_version',$2::bigint,'algorithm_version','quality-v1','generated_at',now(),'age_basis','event_created_at',
  'posted_count',count(*) FILTER(WHERE posted),

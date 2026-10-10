@@ -30,6 +30,8 @@ class MainActivity : Activity() {
     private var eventCache = JSONArray()
     private var page = "首页"
     private var csvAccount = ""
+    private var nativeCSVFormat = ""
+    private var csvLedger = ""
     private var eventCursor = ""
     private var reportMonth = java.time.YearMonth.now()
     private var reviewOnly = false
@@ -566,6 +568,34 @@ class MainActivity : Activity() {
         }
         if (settings.ledger.isNotBlank()) {
             button("历史消费分析") { historicalAnalysis() }
+            button("预览并导入支付账单") {
+                val formats = listOf("WECHAT_PERSONAL_V1", "ALIPAY_PERSONAL_V1")
+                AlertDialog.Builder(this)
+                    .setTitle("账单来源")
+                    .setItems(arrayOf("微信个人账单", "支付宝个人账单")) { _, formatIndex ->
+                        val available =
+                            (0 until accounts.length())
+                                .map { accounts.getJSONObject(it) }
+                                .filter { it.getString("code").startsWith("user.") }
+                        AlertDialog.Builder(this)
+                            .setTitle("账单所属支付账户（去重时始终选同一账户）")
+                            .setItems(available.map { it.getString("name") }.toTypedArray()) { _, i
+                                ->
+                                csvAccount = available[i].getString("id")
+                                csvLedger = settings.ledger
+                                nativeCSVFormat = formats[formatIndex]
+                                startActivityForResult(
+                                    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                                        type = "text/*"
+                                        addCategory(Intent.CATEGORY_OPENABLE)
+                                    },
+                                    42,
+                                )
+                            }
+                            .show()
+                    }
+                    .show()
+            }
             button("导入 CSV") {
                 val available =
                     (0 until accounts.length())
@@ -575,6 +605,7 @@ class MainActivity : Activity() {
                     .setTitle("选择账单账户")
                     .setItems(available.map { it.getString("name") }.toTypedArray()) { _, i ->
                         csvAccount = available[i].getString("id")
+                        csvLedger = settings.ledger
                         startActivityForResult(
                             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                                 type = "text/*"
@@ -630,7 +661,7 @@ class MainActivity : Activity() {
     @Deprecated("Uses system document picker")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 41 && resultCode == RESULT_OK) {
+        if (requestCode in listOf(41, 42) && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             task {
                 val bytes =
@@ -645,15 +676,129 @@ class MainActivity : Activity() {
                         output.toByteArray()
                     } ?: throw IllegalStateException("文件无法读取")
                 require(bytes.size <= 800000) { "CSV 超过大小限制" }
+                require(csvLedger == settings.ledger) { "账本已切换，请重新选择账单" }
+                val csvContent =
+                    Charsets.UTF_8.newDecoder()
+                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                        .decode(java.nio.ByteBuffer.wrap(bytes))
+                        .toString()
+                if (requestCode == 42) {
+                    val format = nativeCSVFormat
+                    val sourceAccount = csvAccount
+                    val ledger = csvLedger
+                    val preview =
+                        JSONObject(
+                            api(
+                                "csv-preview",
+                                JSONObject().put("format", format).put("content", csvContent),
+                            )
+                        )
+                    runOnUiThread {
+                        if (settings.ledger == ledger)
+                            nativeCSVConfirmation(
+                                preview,
+                                csvContent,
+                                format,
+                                sourceAccount,
+                                ledger,
+                            )
+                    }
+                    return@task
+                }
                 api(
                     "csv",
                     JSONObject()
                         .put("command_id", id())
                         .put("account_id", csvAccount)
-                        .put("content", String(bytes, Charsets.UTF_8)),
+                        .put("content", csvContent),
                 )
                 reload()
             }
+        }
+    }
+
+    private fun nativeCSVConfirmation(
+        preview: JSONObject,
+        csvContent: String,
+        format: String,
+        sourceAccount: String,
+        ledger: String,
+    ) {
+        page = "支付账单预览"
+        content.removeAllViews()
+        label("支付账单预览", 24f)
+        val rows = preview.getJSONArray("rows")
+        label("${rows.length()} 条交易记录", 18f)
+        label("请逐个核对支付方式对应的实际账户。仅明确完成的人民币资金变动更新余额，用途先记待查款。未映射、未完成或方向不明的记录保留待确认。", 13f)
+        val available =
+            (0 until accounts.length())
+                .map { accounts.getJSONObject(it) }
+                .filter { it.getString("code").startsWith("user.") }
+        val methods = preview.getJSONArray("payment_methods")
+        if (methods.length() > 50) {
+            label("支付方式超过 50 种，请先分拆账单后重新预览。", 14f)
+            button("返回设置") {
+                page = "设置"
+                render()
+            }
+            return
+        }
+        val mappings = linkedMapOf<String, Spinner>()
+        for (i in 0 until methods.length()) {
+            val method = methods.getString(i)
+            mappings[method] =
+                spinner(
+                    method.ifBlank { "账单未提供支付方式" },
+                    listOf("不确定，保留待确认") + available.map { it.getString("name") },
+                )
+        }
+        val cny = CheckBox(this).apply { text = "已核对这些金额为实际人民币金额" }
+        content.addView(cny)
+        label("交易样例（最多显示前 20 条，导入包含全部记录）", 14f)
+        for (i in 0 until minOf(rows.length(), 20)) {
+            val row = rows.getJSONObject(i)
+            label(
+                "${row.getString("merchant")} · 账单金额 ${money(row.getString("amount_minor"))}（币种待核对）\n${row.getString("payment_method")} · ${row.getString("source_status")}\n来源时间 ${displayTime(row.getString("source_time"))}（本机时区）",
+                13f,
+            )
+        }
+        val command = id()
+        button("确认账户映射并导入") {
+            val confirmed = cny.isChecked
+            val map = JSONObject()
+            mappings.forEach { (method, selector) ->
+                if (selector.selectedItemPosition > 0)
+                    map.put(method, available[selector.selectedItemPosition - 1].getString("id"))
+            }
+            AlertDialog.Builder(this)
+                .setTitle("确认资金变动")
+                .setMessage(
+                    "按你选择的账户导入 ${rows.length()} 条记录。明确完成的人民币收支将更新余额并记为待查款；不确定项不会正式入账。相同交易号有不同内容或映射时整批拒绝，请从原事件修订。"
+                )
+                .setNegativeButton("继续核对", null)
+                .setPositiveButton("确认导入") { _, _ ->
+                    task {
+                        require(settings.ledger == ledger) { "账本已切换，请重新预览" }
+                        api(
+                            "csv-native",
+                            JSONObject()
+                                .put("command_id", command)
+                                .put("statement_account_id", sourceAccount)
+                                .put("format", format)
+                                .put("content", csvContent)
+                                .put("confirmed_final_cny", confirmed)
+                                .put("payment_method_accounts", map),
+                        )
+                        page = "待确认"
+                        reload()
+                    }
+                }
+                .show()
+        }
+        button("取消") {
+            page = "设置"
+            render()
         }
     }
 

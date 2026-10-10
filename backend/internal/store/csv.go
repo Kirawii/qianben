@@ -79,7 +79,11 @@ func (d *DB) ImportCSV(ctx context.Context, actor, ledger string, r CSVRequest) 
 	if e != nil {
 		return nil, e
 	}
-	return command(ctx, d, actor, ledger, r.CommandID, r, "CSV_IMPORTED", func(tx pgx.Tx, l domain.Ledger) (any, error) {
+	return d.importCSVLines(ctx, actor, ledger, r, lines, r, "QIANBEN_CSV_V1", "", Hash([]byte(r.Content)))
+}
+
+func (d *DB) importCSVLines(ctx context.Context, actor, ledger string, r CSVRequest, lines []csvLine, request any, format, sourceIdentity, fileHash string) (json.RawMessage, error) {
+	return command(ctx, d, actor, ledger, r.CommandID, request, "CSV_IMPORTED", func(tx pgx.Tx, l domain.Ledger) (any, error) {
 		all, _, e := accountsTx(ctx, tx, l.ID)
 		if e != nil {
 			return nil, e
@@ -88,22 +92,39 @@ func (d *DB) ImportCSV(ctx context.Context, actor, ledger string, r CSVRequest) 
 		if !ok || !strings.HasPrefix(a.Code, "user.") {
 			return nil, domain.Invalid("导入账户无效")
 		}
+		if native, ok := request.(NativeCSVImportRequest); ok {
+			for _, account := range native.Mappings {
+				mapped, exists := all[account]
+				if !exists || !strings.HasPrefix(mapped.Code, "user.") {
+					return nil, domain.Invalid("支付方式映射账户无效")
+				}
+			}
+		}
 		importID := domain.ID()
 		var exists string
-		e = tx.QueryRow(ctx, `SELECT id::text FROM qb.statement_imports WHERE ledger_id=$1 AND account_id=$2 AND file_hash=$3`, l.ID, a.ID, Hash([]byte(r.Content))).Scan(&exists)
+		e = tx.QueryRow(ctx, `SELECT id::text FROM qb.statement_imports WHERE ledger_id=$1 AND account_id=$2 AND file_hash=$3`, l.ID, a.ID, fileHash).Scan(&exists)
 		if e == nil {
 			return map[string]any{"import_id": exists, "duplicate": true}, nil
 		}
 		if e != pgx.ErrNoRows {
 			return nil, e
 		}
-		_, e = tx.Exec(ctx, `INSERT INTO qb.statement_imports(id,ledger_id,account_id,file_hash,format,rows_count) VALUES($1,$2,$3,$4,'QIANBEN_CSV_V1',$5)`, importID, l.ID, a.ID, Hash([]byte(r.Content)), len(lines))
+		_, e = tx.Exec(ctx, `INSERT INTO qb.statement_imports(id,ledger_id,account_id,file_hash,format,rows_count) VALUES($1,$2,$3,$4,$5,$6)`, importID, l.ID, a.ID, fileHash, format, len(lines))
 		if e != nil {
 			return nil, e
 		}
 		imported := 0
 		for _, line := range lines {
 			identity := "csv.account:" + a.ID
+			if sourceIdentity != "" {
+				identity = sourceIdentity
+			}
+			if line.Facts.FundingAccount != "" {
+				mapped, exists := all[line.Facts.FundingAccount]
+				if !exists || !strings.HasPrefix(mapped.Code, "user.") {
+					return nil, domain.Invalid("支付方式映射账户无效")
+				}
+			}
 			var source, id, oldHash string
 			raw := domain.Hashable(line.Raw)
 			e = tx.QueryRow(ctx, `SELECT s.id::text,o.payload_hash,el.event_id::text FROM qb.source_events s JOIN qb.observations o ON o.source_event_id=s.id JOIN qb.evidence_links el ON el.observation_id=o.id WHERE s.ledger_id=$1 AND s.source_identity=$2 AND s.object_key=$3`, l.ID, identity, line.Record).Scan(&source, &oldHash, &id)

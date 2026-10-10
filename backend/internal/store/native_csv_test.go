@@ -1,6 +1,26 @@
 package store
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestNativeCSVRejectsAmbiguousMoney(t *testing.T) {
+	base := "交易时间,交易类型,交易对方,商品,收/支,金额(元),支付方式,当前状态,交易单号,商户单号,备注\n2026-09-30 12:00:00,商户消费,合成食堂,午餐,支出,12.34,零钱,支付成功,txn1,m1,/\n"
+	for _, amount := range []string{"-12.34", "1e3", "12.345", "0.00", "USD 12.34", "12.3"} {
+		t.Run(amount, func(t *testing.T) {
+			if _, e := parseNativeCSV(NativeCSVRequest{Format: "WECHAT_PERSONAL_V1", Content: strings.Replace(base, "12.34", amount, 1)}); e == nil {
+				t.Fatal("ambiguous monetary value accepted")
+			}
+		})
+	}
+	if _, e := parseNativeCSV(NativeCSVRequest{Format: "WECHAT_PERSONAL_V1", Content: strings.Replace(base, "2026-09-30", "not-a-date", 1)}); e == nil {
+		t.Fatal("invalid source time")
+	}
+	if _, e := parseNativeCSV(NativeCSVRequest{Format: "WECHAT_PERSONAL_V1", Content: strings.Replace(base, "交易单号", "未知单号", 1)}); e == nil {
+		t.Fatal("unknown header accepted")
+	}
+}
 
 func TestNativeCSVHeaderContract(t *testing.T) {
 	content := "微信支付账单明细\n交易时间,交易类型,交易对方,商品,收/支,金额(元),支付方式,当前状态,交易单号,商户单号,备注\n2026-09-30 12:00:00,商户消费,食堂,午餐,支出,￥12.34,零钱,支付成功,txn1,m1,/\n2026-09-30 13:00:00,转账,自己,/,不计收支,5.00,银行卡(1234),处理中,txn2,m2,/\n"

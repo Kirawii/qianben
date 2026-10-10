@@ -262,6 +262,18 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		v, e := s.DB.PreviewNativeCSV(r.Context(), actor, ledger, req)
 		respond(w, v, e)
+	case "csv-native":
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		var req store.NativeCSVImportRequest
+		if e = decode(w, r, &req); e != nil {
+			respond(w, nil, e)
+			return
+		}
+		v, e := s.DB.ImportNativeCSV(r.Context(), actor, ledger, req)
+		respond(w, v, e)
 	case "merge":
 		if r.Method != "POST" {
 			w.WriteHeader(405)
