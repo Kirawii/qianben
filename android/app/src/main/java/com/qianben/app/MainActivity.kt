@@ -102,6 +102,74 @@ class MainActivity : Activity() {
         else "¥ ${money(facts.getString("amount_minor"))}"
     }
 
+    private fun historicalAnalysis() {
+        page = "历史消费分析"
+        content.removeAllViews()
+        label("历史消费分析", 24f)
+        label("只分析起点前记录，不改变余额。消费为退款前金额；退款、转账、垫付与待查款另列，不能据此认定净消费或已对账。", 13f)
+        val now = java.time.LocalDateTime.now()
+        val from = field("开始时间（本机时区）", now.minusMonths(1).format(timeFormat))
+        val to = field("结束时间（不含，本机时区）", now.format(timeFormat))
+        button("查看分析") {
+            val fromText = from.text.toString()
+            val toText = to.text.toString()
+            task {
+                val path =
+                    "historical-analysis?from=${java.net.URLEncoder.encode(instant(fromText), "UTF-8")}&to=${java.net.URLEncoder.encode(instant(toText), "UTF-8")}"
+                val result = JSONObject(api(path))
+                runOnUiThread {
+                    if (page != "历史消费分析") return@runOnUiThread
+                    AlertDialog.Builder(this)
+                        .setTitle("历史消费 · 退款前")
+                        .setMessage(
+                            buildString {
+                                append(
+                                    "¥ ${money(result.getString("gross_consumption_minor"))} · ${result.getLong("included_count")} 笔\n"
+                                )
+                                append("起点 ${displayTime(result.getString("cutover_time"))}\n")
+                                val categories = result.getJSONArray("categories")
+                                for (i in 0 until categories.length()) {
+                                    val c = categories.getJSONObject(i)
+                                    append(
+                                        "\n${c.getString("category")}  ¥ ${money(c.getString("consumption_minor"))}"
+                                    )
+                                }
+                                append("\n\n未计入消费：${result.getLong("excluded_count")} 笔")
+                                val excluded = result.getJSONArray("excluded")
+                                for (i in 0 until excluded.length()) {
+                                    val x = excluded.getJSONObject(i)
+                                    val kindName =
+                                        when (x.getString("kind")) {
+                                            "REFUND" -> "消费退款（待验证关联）"
+                                            "ASSET_REFUND" -> "资产退款（待验证关联）"
+                                            "TRANSFER_OUT" -> "转账转出"
+                                            "TRANSFER_IN" -> "转账转入"
+                                            "ADVANCE" -> "报销垫付"
+                                            "REIMBURSEMENT" -> "报销到账"
+                                            "CASH_OUT" -> "用途待查扣款"
+                                            "CASH_IN" -> "来源待查入款"
+                                            "INCOME" -> "收入"
+                                            "CARD_REPAYMENT" -> "信用卡还款"
+                                            else -> "未确认类型"
+                                        }
+                                    append(
+                                        "\n$kindName · ${x.getLong("count")} 笔 · 人民币 ¥ ${money(x.getString("amount_minor"))}"
+                                    )
+                                }
+                                append("\n\n仅分析已保留的历史记录，不证明账单覆盖完整；退款尚未冲减上述总额。")
+                            }
+                        )
+                        .setPositiveButton("关闭", null)
+                        .show()
+                }
+            }
+        }
+        button("返回设置") {
+            page = "设置"
+            render()
+        }
+    }
+
     private fun shape(color: Int = surface, radius: Int = 16, border: Boolean = false) =
         GradientDrawable().apply {
             setColor(color)
@@ -497,6 +565,7 @@ class MainActivity : Activity() {
             render()
         }
         if (settings.ledger.isNotBlank()) {
+            button("历史消费分析") { historicalAnalysis() }
             button("导入 CSV") {
                 val available =
                     (0 until accounts.length())

@@ -358,7 +358,7 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 		default:
 			w.WriteHeader(405)
 		}
-	case "reports":
+	case "reports", "historical-analysis":
 		if r.Method != "GET" {
 			w.WriteHeader(405)
 			return
@@ -367,6 +367,11 @@ func (s Server) serve(w http.ResponseWriter, r *http.Request) {
 		to, err2 := time.Parse(time.RFC3339, r.URL.Query().Get("to"))
 		if err != nil || err2 != nil {
 			respond(w, nil, domain.Invalid("from/to 须为 RFC3339 时间"))
+			return
+		}
+		if parts[3] == "historical-analysis" {
+			v, e := s.DB.HistoricalAnalysis(r.Context(), actor, ledger, from, to)
+			respond(w, v, e)
 			return
 		}
 		v, e := s.DB.Reports(r.Context(), actor, ledger, from, to)

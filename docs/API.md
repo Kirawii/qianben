@@ -120,3 +120,9 @@ history 返回修订的 facts、evidence_ids、policy_version、source_version�
 重复候选只提示人工核实，检查最近最多 500 个同额事件，并返回 `search_truncated`。币种、方向、实际资金账户或同来源不同对象冲突排除候选；已拆分事件共享继承证据不会被重新建议合并。未取得经济时间时，可用采集时间生成候选，但不会将其作为入账依据。多个候选标记 ambiguous，合并仍需版本校验和显式确认。真实 PostgreSQL 查询及合并后完整簇约束已验收。
 
 quality 返回已入账、自动入账、带手动/CSV 依据的事件数及待确认原因。手动与 CSV 依据可能重叠；自动入账不等于用途已确认、采集完整或银行已对账。异常年龄基于首次 event_created_at，而非经济时间或连续等待时间。账户另返回 book_as_of（最后分录经济时间）、evidence_received_at（最近相关证据收到时间）、last_balance_check_at（最近余额比较时点）；三者不能互相代替。
+
+## 历史消费分析
+
+`GET /v1/ledgers/{ledger}/historical-analysis?from=RFC3339&to=RFC3339` 在一致性快照读取当前历史事件，返回 source_version、algorithm_version=historical-v1、cutover_time 和 [from,to) 区间。只统计 `HISTORICAL_ONLY` 且发生时间不晚于起点的当前有效修订，合并/拆分终止事件不计入。
+
+`gross_consumption_minor` 为 CNY EXPENSE 与 ASSET_PURCHASE 的退款前消费总額；categories 是相同口径分类。included_count 为计入笔数；excluded_count 和 excluded 按 kind 列出其余历史事件的笔数与 CNY 金额。转账、垫付、待查款及未验证历史退款不算消费；本接口不提供退款后净消费。历史金额不是正式会计分录，不改期初、现金流或净资产，不证明账单完整或正式对账。
