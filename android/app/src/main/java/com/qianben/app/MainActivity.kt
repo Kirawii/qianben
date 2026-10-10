@@ -106,7 +106,7 @@ class MainActivity : Activity() {
         page = "历史消费分析"
         content.removeAllViews()
         label("历史消费分析", 24f)
-        label("只分析起点前记录，不改变余额。消费为退款前金额；退款、转账、垫付与待查款另列，不能据此认定净消费或已对账。", 13f)
+        label("只分析起点前记录，不改变余额。已关联原消费的退款按发生期间冲减；转账、垫付、待查款和未关联退款单列。", 13f)
         val now = java.time.LocalDateTime.now()
         val from = field("开始时间（本机时区）", now.minusMonths(1).format(timeFormat))
         val to = field("结束时间（不含，本机时区）", now.format(timeFormat))
@@ -120,11 +120,11 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (page != "历史消费分析") return@runOnUiThread
                     AlertDialog.Builder(this)
-                        .setTitle("历史消费 · 退款前")
+                        .setTitle("历史消费 · 退款后")
                         .setMessage(
                             buildString {
                                 append(
-                                    "¥ ${money(result.getString("gross_consumption_minor"))} · ${result.getLong("included_count")} 笔\n"
+                                    "净消费 ¥ ${money(result.getString("net_consumption_minor"))} · ${result.getLong("included_count")} 笔\n"
                                 )
                                 append("起点 ${displayTime(result.getString("cutover_time"))}\n")
                                 val categories = result.getJSONArray("categories")
@@ -156,7 +156,7 @@ class MainActivity : Activity() {
                                         "\n$kindName · ${x.getLong("count")} 笔 · 人民币 ¥ ${money(x.getString("amount_minor"))}"
                                     )
                                 }
-                                append("\n\n仅分析已保留的历史记录，不证明账单覆盖完整；退款尚未冲减上述总额。")
+                                append("\n\n仅分析已保留的历史记录，不证明账单覆盖完整；未关联退款未冲减。")
                             }
                         )
                         .setPositiveButton("关闭", null)
@@ -1254,7 +1254,7 @@ class MainActivity : Activity() {
             (0 until eventCache.length())
                 .map { eventCache.getJSONObject(it) }
                 .filter {
-                    it.optBoolean("posted") &&
+                    (it.optBoolean("posted") || it.optString("status") == "HISTORICAL_ONLY") &&
                         it.getJSONObject("facts").optString("kind") in
                             listOf("EXPENSE", "ASSET_PURCHASE") &&
                         it.getString("id") != old?.optString("id")
@@ -1295,7 +1295,7 @@ class MainActivity : Activity() {
         )
         val historical =
             CheckBox(this).apply {
-                text = "原消费在记账起点之前（消费退款）"
+                text = "原消费在起点前（仍需关联原记录）"
                 isChecked = facts.optBoolean("historical_original")
                 content.addView(this)
             }

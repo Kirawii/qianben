@@ -89,6 +89,52 @@ func TestHistoricalAnalysisDoesNotRepost(t *testing.T) {
 	if err != nil || r.GrossConsumption != 1234 || r.Categories[0].Category != "食品" {
 		t.Fatal("latest category", r, err)
 	}
+	refundAt := at.Add(30 * time.Minute)
+	refund := domain.Facts{Kind: "REFUND", Amount: 234, Currency: "CNY", OccurredAt: &refundAt, TimePrecision: "EXACT", FundingAccount: a.ID, OriginalEvent: historical.ID}
+	if _, err = db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: refund}); err != nil {
+		t.Fatal(err)
+	}
+	r, err = db.HistoricalAnalysis(ctx, actor, l.ID, at, cut.Add(time.Hour))
+	if err != nil || r.GrossConsumption != 1234 || r.Refund != 234 || r.NetConsumption != 1000 || r.IncludedCount != 2 || r.Categories[0].Amount != 1000 {
+		t.Fatal("historical refund", r, err)
+	}
+	refundPeriod, e := db.HistoricalAnalysis(ctx, actor, l.ID, refundAt, cut)
+	if e != nil || refundPeriod.GrossConsumption != 0 || refundPeriod.Refund != 234 || refundPeriod.NetConsumption != -234 || refundPeriod.Categories[0].Amount != -234 {
+		t.Fatal("refund occurrence interval", refundPeriod, e)
+	}
+	refund.Amount = 1001
+	if _, err = db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: refund}); err == nil {
+		t.Fatal("cumulative historical refund exceeded original")
+	}
+	historical.Facts.Amount = 100
+	if _, err = db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: historical.ID, ExpectedRevision: historical.Revision + 1, Facts: historical.Facts}); err == nil {
+		t.Fatal("linked historical original changed")
+	}
+	formal, err = db.Reports(ctx, actor, l.ID, at, cut.Add(time.Hour))
+	if err != nil || formal.Consumption != 100 || formal.Assets != 9900 {
+		t.Fatal("historical refund reposted", formal, err)
+	}
+	refund.Amount = 100
+	later := cut.Add(2 * time.Minute)
+	refund.OccurredAt = &later
+	unproven := refund
+	unproven.OriginalEvent = ""
+	unproven.HistoricalOriginal = true
+	pendingRaw, e := db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: unproven})
+	var pending domain.Event
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = json.Unmarshal(pendingRaw, &pending); e != nil || pending.Posted || pending.Reason != "REFUND_ORIGINAL_REQUIRED" {
+		t.Fatal("checkbox established refund proof", pending, e)
+	}
+	if _, err = db.SaveEvent(ctx, actor, l.ID, EventRequest{CommandID: domain.ID(), EventID: domain.ID(), Facts: refund}); err != nil {
+		t.Fatal("post-cutover refund with historical proof", err)
+	}
+	formal, err = db.Reports(ctx, actor, l.ID, cut, cut.Add(time.Hour))
+	if err != nil || formal.Consumption != 0 || formal.Assets != 10000 {
+		t.Fatal("refund did not use occurrence period", formal, err)
+	}
 	if _, err = db.HistoricalAnalysis(ctx, domain.ID(), l.ID, at, cut); err == nil {
 		t.Fatal("cross-user analysis")
 	}

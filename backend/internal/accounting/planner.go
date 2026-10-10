@@ -88,7 +88,7 @@ func Plan(ledger domain.Ledger, f domain.Facts, accounts map[string]domain.Accou
 		}
 		dr, cr = system["asset.fixed"], a.ID
 	case "REFUND":
-		if f.OriginalEvent == "" && !f.HistoricalOriginal {
+		if f.OriginalEvent == "" {
 			return block("REFUND_ORIGINAL_REQUIRED")
 		}
 		dr, cr = a.ID, system["expense.general"]

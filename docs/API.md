@@ -89,7 +89,7 @@ history 返回修订的 facts、evidence_ids、policy_version、source_version�
 }
 ```
 
-另外支持 `INCOME,CASH_OUT,CASH_IN,TRANSFER_OUT,TRANSFER_IN,ADVANCE,REIMBURSEMENT,ASSET_PURCHASE,REFUND,ASSET_REFUND,CARD_REPAYMENT`。资产需要 `asset_title`；退款需要 `original_event_id`，历史消费退款可明确 `historical_original:true`；还款需要 `repayment_account_id`。证据不足可返回 `REVIEW_REQUIRED`，这不等于已记成消费。待查款可 `posted:true`，但仍需确认用途。
+另外支持 `INCOME,CASH_OUT,CASH_IN,TRANSFER_OUT,TRANSFER_IN,ADVANCE,REIMBURSEMENT,ASSET_PURCHASE,REFUND,ASSET_REFUND,CARD_REPAYMENT`。资产需要 `asset_title`；退款需要 `original_event_id`，历史消费退款须关联保存的有效历史原消费，`historical_original:true` 仅为声明，不能单独证明退款；还款需要 `repayment_account_id`。证据不足可返回 `REVIEW_REQUIRED`，这不等于已记成消费。待查款可 `posted:true`，但仍需确认用途。
 
 学习分类只在商户与分类均明确时接受，仅影响之后收到的匹配证据；不会推断实际付款账户，也不会重写历史。
 
@@ -123,6 +123,6 @@ quality 返回已入账、自动入账、带手动/CSV 依据的事件数及待�
 
 ## 历史消费分析
 
-`GET /v1/ledgers/{ledger}/historical-analysis?from=RFC3339&to=RFC3339` 在一致性快照读取当前历史事件，返回 source_version、algorithm_version=historical-v1、cutover_time 和 [from,to) 区间。只统计 `HISTORICAL_ONLY` 且发生时间不晚于起点的当前有效修订，合并/拆分终止事件不计入。
+`GET /v1/ledgers/{ledger}/historical-analysis?from=RFC3339&to=RFC3339` 在一致性快照读取当前历史事件，返回 source_version、algorithm_version=historical-v2、cutover_time 和 [from,to) 区间。只统计 `HISTORICAL_ONLY` 且发生时间不晚于起点的当前有效修订，合并/拆分终止事件不计入。
 
-`gross_consumption_minor` 为 CNY EXPENSE 与 ASSET_PURCHASE 的退款前消费总額；categories 是相同口径分类。included_count 为计入笔数；excluded_count 和 excluded 按 kind 列出其余历史事件的笔数与 CNY 金额。转账、垫付、待查款及未验证历史退款不算消费；本接口不提供退款后净消费。历史金额不是正式会计分录，不改期初、现金流或净资产，不证明账单完整或正式对账。
+`gross_consumption_minor` 为 CNY EXPENSE 与 ASSET_PURCHASE 的退款前消费总額；categories 是扣除有效关联退款后的分类。included_count 为计入笔数；excluded_count 和 excluded 按 kind 列出其余历史事件的笔数与 CNY 金额。转账、垫付、待查款及未关联历史退款不算消费；`refund_minor` 为已建立 REFUND_OF 关系的区间内历史退款；`net_consumption_minor` 为原消费减关联退款，分类按原消费当前分类冲减。退款发生区间可以只有退款而呈负数，符合 D-03。未关联退款仍在 excluded。历史金额不是正式会计分录，不改期初、现金流或净资产，不证明账单完整或正式对账。

@@ -78,7 +78,7 @@ func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revi
 		ev.Status = "REVIEW_REQUIRED"
 		ev.Reason = "PURPOSE_REQUIRED"
 	}
-	if ev.Status == "ACTIVE" && (f.Kind == "REFUND" || f.Kind == "ASSET_REFUND") && f.OriginalEvent != "" {
+	if (ev.Status == "ACTIVE" || ev.Status == "HISTORICAL_ONLY") && (f.Kind == "REFUND" || f.Kind == "ASSET_REFUND") && f.OriginalEvent != "" {
 		if !domain.IsUUID(f.OriginalEvent) || f.OriginalEvent == id {
 			return ev, domain.Invalid("原消费事件无效")
 		}
@@ -90,8 +90,9 @@ func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revi
 		if f.Kind == "ASSET_REFUND" {
 			expected = "ASSET_PURCHASE"
 		}
-		if !original.Posted || original.Facts.Kind != expected {
-			return ev, domain.Invalid("退款须关联已入账的同类原消费")
+		historical := original.Status == "HISTORICAL_ONLY" && original.Facts.Currency == "CNY" && original.Facts.Amount > 0 && original.Facts.OccurredAt != nil
+		if (!original.Posted && !historical) || original.Facts.Kind != expected || (historical && ev.Status == "ACTIVE" && f.Kind == "ASSET_REFUND") {
+			return ev, domain.Invalid("退款须关联已入账或有效历史同类原消费；历史资产退款不能冲减当前资产")
 		}
 		if original.Facts.OccurredAt != nil && f.OccurredAt.Before(*original.Facts.OccurredAt) {
 			return ev, domain.Invalid("退款时间早于原消费")
@@ -162,7 +163,7 @@ func writeEvent(ctx context.Context, tx pgx.Tx, l domain.Ledger, id string, revi
 	if e != nil {
 		return ev, e
 	}
-	if ev.Posted && f.OriginalEvent != "" && (f.Kind == "REFUND" || f.Kind == "ASSET_REFUND") {
+	if (ev.Posted || ev.Status == "HISTORICAL_ONLY") && f.OriginalEvent != "" && (f.Kind == "REFUND" || f.Kind == "ASSET_REFUND") {
 		_, e = tx.Exec(ctx, `INSERT INTO qb.relations(id,ledger_id,from_event,to_event,type,allocation,committed_version) VALUES($1,$2,$3,$4,'REFUND_OF',$5,$6)`, domain.ID(), l.ID, id, f.OriginalEvent, int64(f.Amount), l.Version+1)
 		if e != nil {
 			return ev, e
