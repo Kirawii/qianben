@@ -1,0 +1,12 @@
+<!doctype html><meta charset="utf-8"><script src="wasm_exec.js"></script><script>
+(async () => {
+  try {
+    const go = new Go();
+    const bytes = await (await fetch('engine.wasm')).arrayBuffer();
+    const instance = await WebAssembly.instantiate(bytes, go.importObject);
+    go.run(instance.instance).catch(e => DeviceReady.failed(String(e)));
+    if (typeof qianbenInvoke !== 'function') throw new Error('Go bridge unavailable');
+    DeviceReady.ready();
+  } catch (e) { DeviceReady.failed(String(e)); }
+})();
+</script>

@@ -77,6 +77,15 @@ object NotificationSources {
 class Settings(ctx: Context) {
     internal val context = ctx.applicationContext
     private val p = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    var localMode: Boolean
+        get() = p.getBoolean("local_mode", true)
+        set(v) {
+            p.edit().putBoolean("local_mode", v).commit()
+        }
+
+    val endpoint: String
+        get() = if (localMode) "qianben:ondevice" else url
+
     var url: String
         get() = p.getString("url", "http://127.0.0.1:8080")!!
         set(v) {
@@ -349,9 +358,12 @@ object Api {
             .joinToString("") { "%02x".format(it) }
 
     internal fun viewKey(s: Settings, path: String) =
-        digest(s.url + "\n" + s.token) + ":" + digest(path)
+        digest(if (s.localMode) "ondevice:${s.device}" else s.url + "\n" + s.token) +
+            ":" +
+            digest(path)
 
     fun command(ctx: Context, s: Settings, path: String, body: JSONObject): String {
+        if (s.localMode) return request(s, path, body, "qianben:ondevice")
         val q = LocalDB.get(ctx).queue()
         val id = body.getString("command_id")
         require(q.commands().none { it.id != id }) { "有一条操作尚未确认，请先重试上传并刷新" }
@@ -376,18 +388,29 @@ object Api {
         }
     }
 
-    fun request(s: Settings, path: String, body: JSONObject? = null): String {
-        val url = URL(s.url + path)
+    fun request(
+        s: Settings,
+        path: String,
+        body: JSONObject? = null,
+        expectedEndpoint: String? = null,
+    ): String {
+        val local = s.localMode
+        val address = s.url
+        val token = if (local) "" else s.token
+        val endpoint = if (local) "qianben:ondevice" else address
+        require(expectedEndpoint == null || expectedEndpoint == endpoint) { "操作所属账本模式已切换，请切回原模式处理" }
+        if (local) return DeviceEngine.request(s, path, body)
+        val url = URL(address + path)
         require(url.protocol == "https" || (BuildConfig.DEBUG && url.protocol == "http")) {
             "服务地址需要 HTTPS"
         }
         val c = url.openConnection() as HttpURLConnection
-        val cacheKey = viewKey(s, path)
+        val cacheKey = digest(address + "\n" + token) + ":" + digest(path)
         c.connectTimeout = 10000
         c.readTimeout = 20000
         c.instanceFollowRedirects = false
         c.requestMethod = if (body == null) "GET" else "POST"
-        c.setRequestProperty("Authorization", "Bearer ${s.token}")
+        c.setRequestProperty("Authorization", "Bearer $token")
         c.setRequestProperty("Content-Type", "application/json")
         try {
             if (body != null) {
@@ -445,16 +468,16 @@ object Api {
 class UploadWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
     override fun doWork(): Result {
         val s = Settings(applicationContext)
-        if (s.token.isBlank()) return Result.retry()
+        if (!s.localMode && s.token.isBlank()) return Result.retry()
         val q = LocalDB.get(applicationContext).queue()
         return try {
             for (cmd in q.commands()) {
-                if (cmd.endpoint != s.url) {
+                if (cmd.endpoint != s.endpoint) {
                     q.commandReject(cmd.id)
                     continue
                 }
                 try {
-                    Api.request(s, cmd.path, JSONObject(Vault.open(cmd.encrypted)))
+                    Api.request(s, cmd.path, JSONObject(Vault.open(cmd.encrypted)), cmd.endpoint)
                     q.commandAck(cmd.id)
                 } catch (e: ApiFailure) {
                     if (e.status in 400..499) q.commandReject(cmd.id) else throw e
@@ -463,7 +486,7 @@ class UploadWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
             val batch = q.batch()
             val sameServer =
                 batch.filter {
-                    if (it.endpoint != s.url) {
+                    if (it.endpoint != s.endpoint) {
                         q.reject(it.id)
                         false
                     } else true
@@ -476,6 +499,7 @@ class UploadWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                         s,
                         "/v1/ledgers/${group.key}/observations",
                         JSONObject().put("items", items),
+                        group.value.first().endpoint,
                     )
                 val acks = org.json.JSONArray(raw)
                 for (i in 0 until acks.length()) {
@@ -503,7 +527,10 @@ class UploadWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
                     OneTimeWorkRequestBuilder<UploadWorker>()
                         .setConstraints(
                             Constraints.Builder()
-                                .setRequiredNetworkType(NetworkType.CONNECTED)
+                                .setRequiredNetworkType(
+                                    if (Settings(ctx).localMode) NetworkType.NOT_REQUIRED
+                                    else NetworkType.CONNECTED
+                                )
                                 .build()
                         )
                         .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
@@ -520,16 +547,21 @@ class QianBenApp : Application() {
         WorkManager.getInstance(this)
             .enqueueUniquePeriodicWork(
                 "raw-notification-expiry",
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 PeriodicWorkRequestBuilder<RawExpiryWorker>(1, TimeUnit.DAYS).build(),
             )
         WorkManager.getInstance(this)
             .enqueueUniquePeriodicWork(
                 "evidence-recovery",
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 PeriodicWorkRequestBuilder<UploadWorker>(15, TimeUnit.MINUTES)
                     .setConstraints(
-                        Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+                        Constraints.Builder()
+                            .setRequiredNetworkType(
+                                if (Settings(this).localMode) NetworkType.NOT_REQUIRED
+                                else NetworkType.CONNECTED
+                            )
+                            .build()
                     )
                     .build(),
             )

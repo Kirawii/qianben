@@ -11,6 +11,104 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class QueueRecoveryTest {
     @Test
+    fun packagedGoEngineCreatesAndPostsWithoutServerOrToken() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val settings = Settings(ctx)
+        val oldMode = settings.localMode
+        val ledger = UUID.randomUUID().toString()
+        val cut = java.time.Instant.now().minusSeconds(3600).toString()
+        try {
+            settings.localMode = true
+            // No URL, socket, authentication token or PostgreSQL is used here.
+            val root = "/v1/ledgers/$ledger"
+            val created =
+                org.json.JSONObject(
+                    Api.request(
+                        settings,
+                        "/v1/ledgers",
+                        org.json
+                            .JSONObject()
+                            .put("id", ledger)
+                            .put("name", "独立使用合成验收")
+                            .put("cutover_time", cut),
+                    )
+                )
+            assertEquals(ledger, created.getString("id"))
+            val account =
+                org.json.JSONObject(
+                    Api.request(
+                        settings,
+                        "$root/accounts",
+                        org.json
+                            .JSONObject()
+                            .put("command_id", UUID.randomUUID().toString())
+                            .put("name", "合成银行卡")
+                            .put("type", "ASSET")
+                            .put("cash", true),
+                    )
+                )
+            val bank = account.getString("id")
+            Api.request(
+                settings,
+                "$root/opening",
+                org.json
+                    .JSONObject()
+                    .put("command_id", UUID.randomUUID().toString())
+                    .put("account_id", bank)
+                    .put("amount_minor", "10000")
+                    .put("as_of", cut)
+                    .put("meaning", "BALANCE")
+                    .put("expected_revision", 0),
+            )
+            val command = UUID.randomUUID().toString()
+            val body =
+                org.json
+                    .JSONObject()
+                    .put("command_id", command)
+                    .put("event_id", UUID.randomUUID().toString())
+                    .put("expected_revision", 0)
+                    .put(
+                        "facts",
+                        org.json
+                            .JSONObject()
+                            .put("kind", "EXPENSE")
+                            .put("amount_minor", "1234")
+                            .put("currency", "CNY")
+                            .put("funding_account_id", bank)
+                            .put("occurred_at", java.time.Instant.now().minusSeconds(60).toString())
+                            .put("time_precision", "EXACT")
+                            .put("merchant", "合成商户")
+                            .put("category", "餐饮"),
+                    )
+            val event = org.json.JSONObject(Api.request(settings, "$root/events", body))
+            assertTrue(event.getBoolean("posted"))
+            assertEquals(event.toString(), Api.request(settings, "$root/events", body))
+            val accounts = org.json.JSONArray(Api.request(settings, "$root/accounts"))
+            val actual =
+                (0 until accounts.length())
+                    .map { accounts.getJSONObject(it) }
+                    .single { it.getString("id") == bank }
+            assertEquals("8766", actual.getString("balance_minor"))
+            val report =
+                org.json.JSONObject(
+                    Api.request(
+                        settings,
+                        "$root/reports?from=$cut&to=${java.time.Instant.now().plusSeconds(60)}",
+                    )
+                )
+            assertEquals("1234", report.getString("consumption_minor"))
+            assertEquals("8766", report.getString("net_worth_minor"))
+        } finally {
+            Api.request(
+                settings,
+                "/v1/ledgers/$ledger/delete",
+                org.json.JSONObject().put("confirm_name", "独立使用合成验收"),
+            )
+            settings.localMode = oldMode
+        }
+    }
+
+    @Test
     fun rawRetentionMigrationExpiryAndDeletionPreserveQueueAndOtherLedgers() {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val name = "qa-raw-${UUID.randomUUID()}.db"
@@ -182,6 +280,7 @@ class QueueRecoveryTest {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val settings = Settings(ctx)
         val oldUrl = settings.url
+        val oldMode = settings.localMode
         val oldToken = settings.token
         val oldOffline = settings.offline
         val oldTime = settings.cachedAt
@@ -207,6 +306,7 @@ class QueueRecoveryTest {
                 server.close()
             }
         try {
+            settings.localMode = false
             settings.url = "http://127.0.0.1:${server.localPort}"
             settings.token = "qa-cache-token"
             settings.offline = false
@@ -247,6 +347,7 @@ class QueueRecoveryTest {
             server.close()
             LocalDB.get(ctx).queue().clearViews(ledger)
             settings.url = oldUrl
+            settings.localMode = oldMode
             settings.token = oldToken
             settings.offline = oldOffline
             settings.cachedAt = oldTime

@@ -76,7 +76,7 @@ class NotificationCollector : NotificationListenerService() {
             return
         if (title.length + text.length + big.length > 6000) return
         val ledger = s.ledger
-        val endpoint = s.url
+        val endpoint = s.endpoint
         val rawScope =
             try {
                 Api.viewKey(s, "").substringBefore(':')

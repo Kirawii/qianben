@@ -72,7 +72,8 @@ class MainActivity : Activity() {
         window.navigationBarColor = surface
         settings = Settings(this)
         render()
-        if (settings.token.isNotBlank()) reload(preferCache = true)
+        if (settings.localMode || settings.token.isNotBlank())
+            reload(preferCache = !settings.localMode)
     }
 
     private fun id() = UUID.randomUUID().toString()
@@ -457,7 +458,7 @@ class MainActivity : Activity() {
         )
         root.addView(tabs)
         setContentView(root)
-        if (settings.token.isBlank()) {
+        if (!settings.localMode && settings.token.isBlank()) {
             connection()
             return
         }
@@ -475,29 +476,54 @@ class MainActivity : Activity() {
     }
 
     private fun connection() {
-        label("连接你的账本", 22f)
-        val url = field("API 地址", settings.url)
-        val token = field("访问令牌", settings.token)
-        token.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        button("保存并连接") {
-            task {
-                require(url.text.toString().startsWith("https://") || BuildConfig.DEBUG) {
-                    "正式版需要 HTTPS"
-                }
-                val newUrl = url.text.toString().trimEnd('/')
-                val newToken = token.text.toString()
-                if (settings.url != newUrl || settings.token != newToken) {
+        if (settings.localMode) {
+            label("本机账本", 22f)
+            label("账本在这部手机上保存和处理，无需服务器或访问令牌。服务器模式是可选的独立账本，不会自动同步本机数据。", 14f)
+            button("连接已有服务器账本（可选）") {
+                task {
+                    settings.localMode = false
                     settings.ledger = ""
                     accounts = JSONArray()
                     eventCache = JSONArray()
                     ledgers = JSONArray()
-                    eventCursor = ""
-                    settings.offline = false
-                    loadedFromCache = false
+                    runOnUiThread { render() }
                 }
-                settings.url = newUrl
-                settings.token = newToken
-                reload()
+            }
+        } else {
+            button("改用本机账本") {
+                task {
+                    settings.localMode = true
+                    settings.ledger = ""
+                    accounts = JSONArray()
+                    eventCache = JSONArray()
+                    ledgers = JSONArray()
+                    reload()
+                }
+            }
+            label("连接你的账本", 22f)
+            val url = field("API 地址", settings.url)
+            val token = field("访问令牌", settings.token)
+            token.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            button("保存并连接") {
+                task {
+                    require(url.text.toString().startsWith("https://") || BuildConfig.DEBUG) {
+                        "正式版需要 HTTPS"
+                    }
+                    val newUrl = url.text.toString().trimEnd('/')
+                    val newToken = token.text.toString()
+                    if (settings.url != newUrl || settings.token != newToken) {
+                        settings.ledger = ""
+                        accounts = JSONArray()
+                        eventCache = JSONArray()
+                        ledgers = JSONArray()
+                        eventCursor = ""
+                        settings.offline = false
+                        loadedFromCache = false
+                    }
+                    settings.url = newUrl
+                    settings.token = newToken
+                    reload()
+                }
             }
         }
         label("通知仅在你启用后采集。聊天消息不会作为记账来源；系统隐藏的内容无法恢复。", 14f)
