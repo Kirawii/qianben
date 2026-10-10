@@ -141,6 +141,13 @@ class Settings(ctx: Context) {
         set(v) {
             p.edit().putString("last_capture", v).commit()
         }
+
+    var rawRetentionDays: Int
+        get() = p.getInt("raw_retention_days", 7)
+        set(v) {
+            require(v in setOf(0, 1, 7, 30))
+            p.edit().putInt("raw_retention_days", v).commit()
+        }
 }
 
 @Entity
@@ -179,8 +186,40 @@ data class CachedView(
     val capturedAt: String,
 )
 
+/** Separate from the upload queue: never sent to the server or removed by an ACK. */
+@Entity
+data class LocalRawNotification(
+    @PrimaryKey val id: String,
+    val ledger: String,
+    val scope: String,
+    val encrypted: String,
+    val capturedAt: Long,
+    val expiresAt: Long,
+)
+
 @Dao
 interface QueueDao {
+    @Insert fun raw(item: LocalRawNotification)
+
+    @Query("DELETE FROM LocalRawNotification WHERE expiresAt<=:now") fun expireRaw(now: Long)
+
+    @Query(
+        "DELETE FROM LocalRawNotification WHERE id NOT IN (SELECT id FROM LocalRawNotification ORDER BY capturedAt DESC,id DESC LIMIT 5000)"
+    )
+    fun boundRaw()
+
+    @Query(
+        "SELECT * FROM LocalRawNotification WHERE ledger=:ledger AND scope=:scope AND expiresAt>:now ORDER BY capturedAt DESC,id DESC LIMIT 50"
+    )
+    fun raw(ledger: String, scope: String, now: Long): List<LocalRawNotification>
+
+    @Query("DELETE FROM LocalRawNotification") fun clearRaw()
+
+    @Query("DELETE FROM LocalRawNotification WHERE ledger=:ledger") fun clearRaw(ledger: String)
+
+    @Query("UPDATE LocalRawNotification SET expiresAt=MIN(expiresAt,capturedAt+:duration)")
+    fun shortenRaw(duration: Long)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE) fun cache(value: CachedView)
 
     @Query("SELECT * FROM CachedView WHERE `key`=:key") fun cache(key: String): CachedView?
@@ -230,12 +269,20 @@ interface QueueDao {
     fun clear(ledger: String) {
         clearPending(ledger)
         clearViews(ledger)
+        clearRaw(ledger)
     }
 }
 
 @Database(
-    entities = [Pending::class, Episode::class, PendingCommand::class, CachedView::class],
-    version = 3,
+    entities =
+        [
+            Pending::class,
+            Episode::class,
+            PendingCommand::class,
+            CachedView::class,
+            LocalRawNotification::class,
+        ],
+    version = 4,
     exportSchema = false,
 )
 abstract class LocalDB : RoomDatabase() {
@@ -243,6 +290,14 @@ abstract class LocalDB : RoomDatabase() {
 
     companion object {
         @Volatile private var instance: LocalDB? = null
+        val RAW_MIGRATION =
+            object : androidx.room.migration.Migration(3, 4) {
+                override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS LocalRawNotification (id TEXT NOT NULL PRIMARY KEY,ledger TEXT NOT NULL,scope TEXT NOT NULL,encrypted TEXT NOT NULL,capturedAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL)"
+                    )
+                }
+            }
 
         fun get(ctx: Context): LocalDB =
             instance
@@ -254,6 +309,7 @@ abstract class LocalDB : RoomDatabase() {
                                 "qianben-private.db",
                             )
                             .addMigrations(
+                                RAW_MIGRATION,
                                 object : androidx.room.migration.Migration(1, 2) {
                                     override fun migrate(
                                         db: androidx.sqlite.db.SupportSQLiteDatabase
@@ -460,6 +516,13 @@ class UploadWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
 class QianBenApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        io.execute { LocalDB.get(this).queue().expireRaw(System.currentTimeMillis()) }
+        WorkManager.getInstance(this)
+            .enqueueUniquePeriodicWork(
+                "raw-notification-expiry",
+                ExistingPeriodicWorkPolicy.KEEP,
+                PeriodicWorkRequestBuilder<RawExpiryWorker>(1, TimeUnit.DAYS).build(),
+            )
         WorkManager.getInstance(this)
             .enqueueUniquePeriodicWork(
                 "evidence-recovery",
@@ -476,4 +539,14 @@ class QianBenApp : Application() {
     companion object {
         val io = Executors.newSingleThreadExecutor()
     }
+}
+
+class RawExpiryWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
+    override fun doWork(): Result =
+        try {
+            LocalDB.get(applicationContext).queue().expireRaw(System.currentTimeMillis())
+            Result.success()
+        } catch (_: Exception) {
+            Result.retry()
+        }
 }

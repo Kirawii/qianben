@@ -6,6 +6,7 @@ import android.service.notification.StatusBarNotification
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 
 class NotificationCollector : NotificationListenerService() {
@@ -75,6 +76,14 @@ class NotificationCollector : NotificationListenerService() {
             return
         if (title.length + text.length + big.length > 6000) return
         val ledger = s.ledger
+        val endpoint = s.url
+        val rawScope =
+            try {
+                Api.viewKey(s, "").substringBefore(':')
+            } catch (_: Exception) {
+                s.captureError = "本机身份读取失败，请检查设置"
+                return
+            }
         QianBenApp.io.execute {
             try {
                 val db = LocalDB.get(this)
@@ -92,6 +101,34 @@ class NotificationCollector : NotificationListenerService() {
                     val episode = old?.episode ?: UUID.randomUUID().toString()
                     val seq = (old?.sequence ?: 0) + 1
                     val id = UUID.randomUUID().toString()
+                    val captured = System.currentTimeMillis()
+                    q.expireRaw(captured)
+                    if (s.rawRetentionDays > 0) {
+                        val original =
+                            JSONObject()
+                                .put("package", sbn.packageName)
+                                .put("title", title)
+                                .put("text", text)
+                                .put("big_text", big)
+                                .put("raw_hash", hash)
+                                .put("parser_version", "local-notification-v1")
+                                .put("snapshot_key", "$episode:$seq")
+                                .put(
+                                    "notification_posted_at",
+                                    Instant.ofEpochMilli(sbn.postTime).toString(),
+                                )
+                        q.raw(
+                            LocalRawNotification(
+                                id,
+                                ledger,
+                                rawScope,
+                                Vault.seal(original.toString()),
+                                captured,
+                                captured + TimeUnit.DAYS.toMillis(s.rawRetentionDays.toLong()),
+                            )
+                        )
+                        q.boundRaw()
+                    }
                     val payload =
                         JSONObject()
                             .put("delivery_id", id)
@@ -124,7 +161,7 @@ class NotificationCollector : NotificationListenerService() {
                                 Instant.ofEpochMilli(sbn.postTime).toString(),
                             )
                             .put("content_availability", "AVAILABLE")
-                    q.add(Pending(id, ledger, Vault.seal(payload.toString()), s.url))
+                    q.add(Pending(id, ledger, Vault.seal(payload.toString()), endpoint))
                     q.episode(Episode(sbn.key, episode, hash, seq))
                 }
                 s.lastCapture = Instant.now().toString()

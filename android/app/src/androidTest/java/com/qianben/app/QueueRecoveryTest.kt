@@ -11,6 +11,70 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class QueueRecoveryTest {
     @Test
+    fun rawRetentionMigrationExpiryAndDeletionPreserveQueueAndOtherLedgers() {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "qa-raw-${UUID.randomUUID()}.db"
+        val old = ctx.openOrCreateDatabase(name, 0, null)
+        old.execSQL(
+            "CREATE TABLE Pending (id TEXT NOT NULL PRIMARY KEY,ledger TEXT NOT NULL,encrypted TEXT NOT NULL,endpoint TEXT NOT NULL,status TEXT NOT NULL)"
+        )
+        old.execSQL(
+            "CREATE TABLE Episode (`key` TEXT NOT NULL PRIMARY KEY,episode TEXT NOT NULL,hash TEXT NOT NULL,sequence INTEGER NOT NULL)"
+        )
+        old.execSQL(
+            "CREATE TABLE PendingCommand (id TEXT NOT NULL PRIMARY KEY,path TEXT NOT NULL,encrypted TEXT NOT NULL,endpoint TEXT NOT NULL,status TEXT NOT NULL)"
+        )
+        old.execSQL(
+            "CREATE TABLE CachedView (`key` TEXT NOT NULL PRIMARY KEY,ledger TEXT NOT NULL,encrypted TEXT NOT NULL,capturedAt TEXT NOT NULL)"
+        )
+        val sealed = Vault.seal("支付成功 支付30.50元 合成商户")
+        old.execSQL(
+            "INSERT INTO Pending VALUES ('queued','ledger-a',?,'https://example.invalid','QUEUED')",
+            arrayOf(sealed),
+        )
+        old.version = 3
+        old.close()
+        var db =
+            Room.databaseBuilder(ctx, LocalDB::class.java, name)
+                .addMigrations(LocalDB.RAW_MIGRATION)
+                .build()
+        try {
+            var q = db.queue()
+            assertEquals("queued", q.batch().single().id)
+            assertFalse(sealed.contains("商户"))
+            q.raw(LocalRawNotification("expired", "ledger-a", "identity-a", sealed, 0, 100))
+            q.raw(LocalRawNotification("alive", "ledger-a", "identity-a", sealed, 100, 300))
+            q.raw(LocalRawNotification("other", "ledger-b", "identity-b", sealed, 100, 500))
+            assertTrue(q.raw("ledger-a", "identity-b", 101).isEmpty())
+            assertEquals("alive", q.raw("ledger-a", "identity-a", 100).single().id)
+            q.expireRaw(100)
+            db.close()
+            db = Room.databaseBuilder(ctx, LocalDB::class.java, name).build()
+            q = db.queue()
+            assertEquals(
+                "支付成功 支付30.50元 合成商户",
+                Vault.open(q.raw("ledger-a", "identity-a", 101).single().encrypted),
+            )
+            q.shortenRaw(150)
+            assertEquals(250L, q.raw("ledger-a", "identity-a", 101).single().expiresAt)
+            q.shortenRaw(1000)
+            assertEquals(250L, q.raw("ledger-a", "identity-a", 101).single().expiresAt)
+            q.ack("queued")
+            assertEquals(1, q.raw("ledger-a", "identity-a", 101).size)
+            q.add(Pending("still-queued", "ledger-b", sealed, "https://example.invalid"))
+            q.clear("ledger-a")
+            assertTrue(q.raw("ledger-a", "identity-a", 101).isEmpty())
+            assertEquals(1, q.raw("ledger-b", "identity-b", 101).size)
+            q.clearRaw()
+            assertTrue(q.raw("ledger-b", "identity-b", 101).isEmpty())
+            assertEquals("still-queued", q.batch().single().id)
+        } finally {
+            db.close()
+            ctx.deleteDatabase(name)
+        }
+    }
+
+    @Test
     fun localNotificationSummaryDoesNotLeakOrInventEvidence() {
         val hash = "a".repeat(64)
         val result = LocalNotificationParser.summarize("微信支付", "支付成功 支付30.50元 商户秘密名称", "", hash)

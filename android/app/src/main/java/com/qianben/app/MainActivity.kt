@@ -529,6 +529,44 @@ class MainActivity : Activity() {
         }
         label("新通知在本机提取金额、币种和收支方向，只上传结构化提示及原文摘要哈希，不上传通知全文。旧版已排队通知仍按原格式上传；关闭来源仅停止新采集。", 13f)
         label(
+            "财务通知原文在本机加密保留 ${settings.rawRetentionDays} 天，最多 5000 份；到期或删除后无法重新解析原文，服务器的已接受事实和账务历史不受影响。",
+            13f,
+        )
+        button("通知原文保留期限") {
+            val days = listOf(0, 1, 7, 30)
+            AlertDialog.Builder(this)
+                .setTitle("本机原文保留期限")
+                .setItems(arrayOf("不保留并删除已有原文", "1 天", "7 天", "30 天")) { _, index ->
+                    task {
+                        settings.rawRetentionDays = days[index]
+                        val q = LocalDB.get(this).queue()
+                        if (days[index] == 0) q.clearRaw()
+                        else {
+                            q.shortenRaw(
+                                java.util.concurrent.TimeUnit.DAYS.toMillis(days[index].toLong())
+                            )
+                            q.expireRaw(System.currentTimeMillis())
+                        }
+                        runOnUiThread { render() }
+                    }
+                }
+                .show()
+        }
+        button("查看本机通知原文") { localRawNotifications() }
+        button("删除本机全部通知原文") {
+            AlertDialog.Builder(this)
+                .setTitle("删除本机原文？")
+                .setMessage("删除所有账本的本机通知原文，无法恢复或重新解析。不会删除待上传结构化证据、服务器账务或既有备份。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("删除") { _, _ ->
+                    task {
+                        LocalDB.get(this).queue().clearRaw()
+                        runOnUiThread { Toast.makeText(this, "本机原文已删除", Toast.LENGTH_SHORT).show() }
+                    }
+                }
+                .show()
+        }
+        label(
             "通知监听：${if(NotificationCollector.connected) "已连接" else "未连接"}\n最近采集：${settings.lastCapture.ifBlank{"尚无记录"}}",
             13f,
         )
@@ -651,6 +689,68 @@ class MainActivity : Activity() {
                             settings.ledger = ""
                             settings.collecting = false
                             reload()
+                        }
+                    }
+                    .show()
+            }
+        }
+    }
+
+    private fun localRawNotifications() {
+        val ledger = settings.ledger
+        val scope = Api.viewKey(settings, "").substringBefore(':')
+        task {
+            val q = LocalDB.get(this).queue()
+            q.expireRaw(System.currentTimeMillis())
+            val originals = q.raw(ledger, scope, System.currentTimeMillis())
+            runOnUiThread {
+                if (
+                    settings.ledger != ledger ||
+                        Api.viewKey(settings, "").substringBefore(':') != scope
+                )
+                    return@runOnUiThread
+                if (originals.isEmpty()) {
+                    AlertDialog.Builder(this)
+                        .setTitle("本机通知原文")
+                        .setMessage("当前身份和账本没有保留中的原文。原文关闭保留、到期或删除后无法重新解析；既有结构化事实仍可查看。")
+                        .setPositiveButton("知道了", null)
+                        .show()
+                    return@runOnUiThread
+                }
+                AlertDialog.Builder(this)
+                    .setTitle("最近 50 份本机原文 · 点击本地重新解析")
+                    .setItems(
+                        originals
+                            .map { displayTime(Instant.ofEpochMilli(it.capturedAt).toString()) }
+                            .toTypedArray()
+                    ) { _, index ->
+                        task {
+                            val retained =
+                                q.raw(ledger, scope, System.currentTimeMillis()).firstOrNull {
+                                    it.id == originals[index].id
+                                } ?: throw IllegalStateException("原文已到期或删除，无法重新解析")
+                            val raw = JSONObject(Vault.open(retained.encrypted))
+                            val parsed =
+                                LocalNotificationParser.summarize(
+                                    raw.getString("title"),
+                                    raw.getString("text"),
+                                    raw.getString("big_text"),
+                                    raw.getString("raw_hash"),
+                                )
+                            runOnUiThread {
+                                if (
+                                    settings.ledger != ledger ||
+                                        Api.viewKey(settings, "").substringBefore(':') != scope
+                                )
+                                    return@runOnUiThread
+                                AlertDialog.Builder(this)
+                                    .setTitle("本机原文与重新解析提示")
+                                    .setMessage(
+                                        "${NotificationSources.names[raw.getString("package")].orEmpty()}\n${raw.getString("title")}\n${raw.getString("text")}\n${raw.getString("big_text")}\n\n重新解析 ${parsed.getString("version")}：${parsed.getString("currency")} ${money(parsed.getString("amount_minor"))} · ${parsed.getString("kind")}\n这是提示，未上传或修改账务。通知发布时间不证明交易发生时间。\n原文到期：${displayTime(Instant.ofEpochMilli(retained.expiresAt).toString())}"
+                                    )
+                                    .setPositiveButton("关闭", null)
+                                    .show()
+                            }
                         }
                     }
                     .show()
